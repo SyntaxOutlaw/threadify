@@ -1,0 +1,38 @@
+# Dependency directories
+vendor/
+js/node_modules/
+
+# Compiled assets
+js/dist/
+
+# Lock files (optional - you can choose to include these)
+js/package-lock.json
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Optional cache directories
+.npm
+.eslintcache 
