@@ -1,0 +1,255 @@
+// Threadify Extension - Forum Styles
+// Provides visual threading with indentation for nested replies
+
+// Thread indentation settings
+@thread-indent-size: 30px;      // How much to indent each level
+@thread-max-depth: 10;           // Maximum thread depth to style
+@thread-border-color: #e0e6ed;  // Color for thread connection lines
+@thread-bg-subtle: #f8f9fa;     // Subtle background for threaded posts
+
+// Base styling for all threaded posts
+.Post--threaded {
+  position: relative;
+  
+  // Add a subtle left border to indicate this is a threaded reply
+  &::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background-color: @thread-border-color;
+  }
+  
+  // Reduced padding and margins for more compact threaded posts
+  .Post-body {
+    background-color: @thread-bg-subtle;
+    border-radius: 4px;
+    padding: 6px;  // Reduced vertical padding, keep horizontal
+    margin-bottom: 6px;  // Reduced vertical spacing between posts
+  }
+  
+  // Compact post header/meta spacing
+  .Post-header {
+    margin-bottom: 6px;  // Reduced spacing after header
+    
+    .PostMeta {
+      margin-top: 2px;  // Less space above meta
+    }
+  }
+  
+  // Tighter content spacing
+  .Post-content {
+    line-height: 1.4;  // Slightly tighter line spacing
+    
+    p {
+      margin-bottom: 6px;  // Reduced paragraph spacing
+      
+      &:last-child {
+        margin-bottom: 0;  // No margin on last paragraph
+      }
+    }
+    
+    // Reduce spacing for other content elements
+    ul, ol {
+      margin-bottom: 6px;
+    }
+    
+    blockquote {
+      margin: 6px 0;
+    }
+  }
+}
+
+// Simple, clear indentation for each thread depth
+.Post--thread-depth-1 {
+  margin-left: @thread-indent-size;
+  
+  &::before {
+    background-color: #4D698E;
+    width: 3px;
+  }
+}
+
+.Post--thread-depth-2 {
+  margin-left: (@thread-indent-size * 2);
+  
+  &::before {
+    background-color: #67b26f;
+    width: 3px;
+  }
+}
+
+.Post--thread-depth-3 {
+  margin-left: (@thread-indent-size * 3);
+  
+  &::before {
+    background-color: #f39c12;
+    width: 3px;
+  }
+}
+
+.Post--thread-depth-4 {
+  margin-left: (@thread-indent-size * 4);
+  
+  &::before {
+    background-color: #e74c3c;
+    width: 3px;
+  }
+}
+
+.Post--thread-depth-5 {
+  margin-left: (@thread-indent-size * 5);
+  
+  &::before {
+    background-color: #9b59b6;
+    width: 3px;
+  }
+}
+
+.Post--thread-depth-6 {
+  margin-left: (@thread-indent-size * 6);
+  
+  &::before {
+    background-color: #1abc9c;
+    width: 3px;
+  }
+}
+
+.Post--thread-depth-7 {
+  margin-left: (@thread-indent-size * 7);
+  
+  &::before {
+    background-color: #34495e;
+    width: 3px;
+  }
+}
+
+.Post--thread-depth-8 {
+  margin-left: (@thread-indent-size * 8);
+  
+  &::before {
+    background-color: #e67e22;
+    width: 3px;
+  }
+}
+
+.Post--thread-depth-9 {
+  margin-left: (@thread-indent-size * 9);
+  
+  &::before {
+    background-color: #2c3e50;
+    width: 3px;
+  }
+}
+
+.Post--thread-depth-10 {
+  margin-left: (@thread-indent-size * 10);
+  
+  &::before {
+    background-color: #8e44ad;
+    width: 3px;
+  }
+}
+
+// Thread connection lines
+.Post--threaded {
+  &::after {
+    content: '';
+    position: absolute;
+    left: 2px;
+    top: 15px;  // Adjusted for smaller posts
+    width: 8px;  // Slightly smaller
+    height: 1px;
+    background-color: @thread-border-color;
+  }
+}
+
+// Responsive design - reduce indentation on mobile
+@media (max-width: 768px) {
+  .Post--threaded {
+    // Even more compact padding on mobile, but keep text/avatar sizes
+    .Post-body {
+      padding: 6px 10px !important;  // Very compact padding
+      margin-bottom: 4px !important;  // Minimal spacing between posts
+    }
+    
+    .Post-header {
+      margin-bottom: 4px !important;  // Minimal header spacing
+    }
+    
+    .Post-content {
+      p {
+        margin-bottom: 4px !important;  // Very tight paragraph spacing
+      }
+      
+      ul, ol, blockquote {
+        margin-bottom: 4px !important;
+      }
+    }
+  }
+  
+  .Post--thread-depth-1,
+  .Post--thread-depth-2,
+  .Post--thread-depth-3,
+  .Post--thread-depth-4,
+  .Post--thread-depth-5,
+  .Post--thread-depth-6,
+  .Post--thread-depth-7,
+  .Post--thread-depth-8,
+  .Post--thread-depth-9,
+  .Post--thread-depth-10 {
+    margin-left: 8px !important; // Even smaller indent on mobile
+  }
+  
+  // Use different colors to distinguish levels on mobile
+  .Post--thread-depth-1::before { background-color: #4D698E; width: 3px; }  // Slightly thinner
+  .Post--thread-depth-2::before { background-color: #67b26f; width: 3px; }
+  .Post--thread-depth-3::before { background-color: #f39c12; width: 3px; }
+  .Post--thread-depth-4::before { background-color: #e74c3c; width: 3px; }
+  .Post--thread-depth-5::before { background-color: #9b59b6; width: 3px; }
+  .Post--thread-depth-6::before { background-color: #1abc9c; width: 3px; }
+  .Post--thread-depth-7::before { background-color: #34495e; width: 3px; }
+  .Post--thread-depth-8::before { background-color: #e67e22; width: 3px; }
+  .Post--thread-depth-9::before { background-color: #2c3e50; width: 3px; }
+  .Post--thread-depth-10::before { background-color: #8e44ad; width: 3px; }
+}
+
+// Hover effects
+.Post--threaded {
+  transition: all 0.2s ease;
+  
+  &:hover {
+    &::before {
+      width: 4px;
+    }
+    
+    .Post-body {
+      background-color: darken(@thread-bg-subtle, 5%);
+      transform: translateX(2px);  // Subtle shift on hover
+    }
+  }
+}
+
+// Threading indicator in post meta - more subtle
+.Post--threaded .PostMeta {
+  &::before {
+    content: '↳ ';
+    color: @thread-border-color;
+    font-weight: normal;  // Less bold
+    margin-right: 3px;  // Less margin
+  }
+}
+
+// Debug styles to help see what's happening
+.Post--thread-depth-1 { border-top: 2px solid red; }
+.Post--thread-depth-2 { border-top: 2px solid blue; }
+.Post--thread-depth-3 { border-top: 2px solid green; }
+.Post--thread-depth-4 { border-top: 2px solid orange; }
+.Post--thread-depth-5 { border-top: 2px solid purple; }
+.Post--thread-depth-6 { border-top: 2px solid teal; }
+.Post--thread-depth-7 { border-top: 2px solid navy; }
+.Post--thread-depth-8 { border-top: 2px solid brown; }
+.Post--thread-depth-9 { border-top: 2px solid black; }
+.Post--thread-depth-10 { border-top: 2px solid indigo; }
