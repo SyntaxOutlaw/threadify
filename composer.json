@@ -1,0 +1,25 @@
+{
+    "name": "syntaxoutlaw/threadify",
+    "description": "A Flarum extension that adds threaded discussions with visual indentation to your forum, making complex conversations easier to follow.",
+    "type": "flarum-extension",
+    "license": "MIT",
+    "require": {
+        "flarum/core": "^1.2.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "SyntaxOutlaw\\Threadify\\": "src/"
+        }
+    },
+    "extra": {
+        "flarum-extension": {
+            "title": "Threadify",
+            "category": "feature",
+            "icon": {
+                "name": "fas fa-comments",
+                "backgroundColor": "#4D698E",
+                "color": "#fff"
+            }
+        }
+    }
+}
