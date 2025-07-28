@@ -1,7 +1,7 @@
 # Threadify for Flarum
 
 ![License](https://img.shields.io/github/license/syntaxoutlaw/threadify) ![Packagist Version](https://img.shields.io/packagist/v/syntaxoutlaw/threadify)
-![Packagist Downloads](https://img.shields.io/packagist/dt/syntaxoutlaw/threadify)![https://coff.ee/syntaxoutlaw](https://img.shields.io/badge/Buy_Me_A_Coffee-green?link=https://coff.ee%2Fsyntaxoutlaw)
+![Packagist Downloads](https://img.shields.io/packagist/dt/syntaxoutlaw/threadify) ![https://coff.ee/syntaxoutlaw](https://img.shields.io/badge/Buy_Me_A_Coffee-green?link=https://coff.ee%2Fsyntaxoutlaw)
 
 
 A Flarum extension that adds **threaded discussions** with visual indentation to your forum, making complex conversations easier to follow.
