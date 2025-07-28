@@ -19,12 +19,13 @@ return [
         // Get the proper table name with prefix
         $tableName = 'threadify_threads';
         
-        // Check if the threadify_threads table exists
+        // Check if the threadify_threads table exists by trying to query it
         try {
             $connection->select("SELECT 1 FROM {$tableName} LIMIT 1");
             echo "✅ Table {$tableName} exists, proceeding with population.\n";
         } catch (\Exception $e) {
             echo "❌ Error: Table {$tableName} does not exist. Please ensure migration 2025_01_20_000003_create_threadify_threads_table.php has been run first.\n";
+            echo "Error details: " . $e->getMessage() . "\n";
             return;
         }
         
@@ -125,9 +126,7 @@ return [
     }
 ];
 
-/**
- * Calculate thread data for a post
- */
+// Helper functions for the migration
 function calculateThreadData($connection, $post, $parentId, $tableName)
 {
     if (!$parentId) {
