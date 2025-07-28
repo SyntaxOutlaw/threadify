@@ -3,132 +3,6 @@
 use Illuminate\Database\Schema\Builder;
 use Illuminate\Database\Schema\Blueprint;
 
-return [
-    'up' => function (Builder $schema) {
-        try {
-            $connection = $schema->getConnection();
-            
-            // Test database connection
-            $connection->getPdo();
-            echo "Database connection successful\n";
-        } catch (\Exception $e) {
-            echo "Error connecting to database: " . $e->getMessage() . "\n";
-            return;
-        }
-        
-        // Get the proper table name with prefix
-        $tableName = 'threadify_threads';
-        
-        // Check if the threadify_threads table exists by trying to query it
-        try {
-            $connection->select("SELECT 1 FROM {$tableName} LIMIT 1");
-            echo "✅ Table {$tableName} exists, proceeding with population.\n";
-        } catch (\Exception $e) {
-            echo "❌ Error: Table {$tableName} does not exist. Please ensure migration 2025_01_20_000003_create_threadify_threads_table.php has been run first.\n";
-            echo "Error details: " . $e->getMessage() . "\n";
-            return;
-        }
-        
-        // Check if posts table has parent_id column
-        if (!$schema->hasColumn('posts', 'parent_id')) {
-            echo "Error: posts table does not have parent_id column. Please ensure migration 2025_01_20_000001_add_parent_id_to_posts.php has been run first.\n";
-            echo "Attempting to add parent_id column...\n";
-            
-            try {
-                $schema->table('posts', function (Blueprint $table) {
-                    $table->unsignedInteger('parent_id')->nullable()->after('discussion_id');
-                });
-                echo "Successfully added parent_id column to posts table\n";
-            } catch (\Exception $e) {
-                echo "Error adding parent_id column: " . $e->getMessage() . "\n";
-                return;
-            }
-        }
-        
-        echo "Populating {$tableName} table from existing parent_id data...\n";
-        
-        try {
-            // Get all posts ordered by discussion and creation time
-            $posts = $connection->table('posts')
-                ->where('type', 'comment')
-                ->orderBy('discussion_id')
-                ->orderBy('created_at')
-                ->get();
-        } catch (\Exception $e) {
-            echo "Error fetching posts: " . $e->getMessage() . "\n";
-            return;
-        }
-        
-        $processedCount = 0;
-        $errorCount = 0;
-        
-        foreach ($posts as $post) {
-            try {
-                // Skip if thread entry already exists
-                $exists = $connection->table($tableName)
-                    ->where('post_id', $post->id)
-                    ->exists();
-                    
-                if ($exists) {
-                    continue;
-                }
-                
-                // Calculate thread data
-                $parentId = $post->parent_id;
-                $threadData = calculateThreadData($connection, $post, $parentId, $tableName);
-                
-                // Insert thread entry
-                $connection->table($tableName)->insert([
-                    'discussion_id' => $post->discussion_id,
-                    'post_id' => $post->id,
-                    'parent_post_id' => $parentId,
-                    'root_post_id' => $threadData['root_post_id'],
-                    'depth' => $threadData['depth'],
-                    'thread_path' => $threadData['thread_path'],
-                    'child_count' => 0, // Will be calculated after all posts are inserted
-                    'descendant_count' => 0, // Will be calculated after all posts are inserted
-                    'created_at' => $post->created_at,
-                    'updated_at' => $post->created_at, // Use created_at since updated_at may not exist
-                ]);
-                
-                $processedCount++;
-                
-                if ($processedCount % 100 === 0) {
-                    echo "Processed {$processedCount} posts...\n";
-                }
-                
-            } catch (\Exception $e) {
-                $errorCount++;
-                echo "Error processing post {$post->id}: " . $e->getMessage() . "\n";
-            }
-        }
-        
-        echo "Phase 1 complete: Processed {$processedCount} posts with {$errorCount} errors\n";
-        
-        // Phase 2: Update child and descendant counts
-        echo "Calculating child and descendant counts...\n";
-        updateThreadCounts($connection, $tableName);
-        
-        echo "✅ Migration completed successfully!\n";
-    },
-    
-    'down' => function (Builder $schema) {
-        // Clear the threadify_threads table
-        $tableName = 'threadify_threads';
-        
-        try {
-            if ($schema->hasTable($tableName)) {
-                $schema->table($tableName, function (Blueprint $table) {
-                    $table->truncate();
-                });
-                echo "Cleared {$tableName} table\n";
-            }
-        } catch (\Exception $e) {
-            echo "Error clearing table: " . $e->getMessage() . "\n";
-        }
-    }
-];
-
 // Helper functions for the migration
 function calculateThreadData($connection, $post, $parentId, $tableName)
 {
@@ -226,4 +100,134 @@ function updateThreadCounts($connection, $tableName)
     } catch (\Exception $e) {
         echo "Error updating thread counts: " . $e->getMessage() . "\n";
     }
-} 
+}
+
+return [
+    'up' => function (Builder $schema) {
+        try {
+            $connection = $schema->getConnection();
+            
+            // Test database connection
+            $connection->getPdo();
+            echo "Database connection successful\n";
+        } catch (\Exception $e) {
+            echo "Error connecting to database: " . $e->getMessage() . "\n";
+            return;
+        }
+        
+        // Get the proper table name with prefix
+        $tableName = 'threadify_threads';
+        
+        // Check if the threadify_threads table exists by trying to query it
+        try {
+            $connection->select("SELECT 1 FROM {$tableName} LIMIT 1");
+            echo "✅ Table {$tableName} exists, proceeding with population.\n";
+        } catch (\Exception $e) {
+            echo "❌ Error: Table {$tableName} does not exist. Please ensure migration 2025_01_20_000003_create_threadify_threads_table.php has been run first.\n";
+            echo "Error details: " . $e->getMessage() . "\n";
+            return;
+        }
+        
+        // Check if posts table has parent_id column
+        if (!$schema->hasColumn('posts', 'parent_id')) {
+            echo "Error: posts table does not have parent_id column. Please ensure migration 2025_01_20_000001_add_parent_id_to_posts.php has been run first.\n";
+            echo "Attempting to add parent_id column...\n";
+            
+            try {
+                $schema->table('posts', function (Blueprint $table) {
+                    $table->unsignedInteger('parent_id')->nullable()->after('discussion_id');
+                });
+                echo "Successfully added parent_id column to posts table\n";
+            } catch (\Exception $e) {
+                echo "Error adding parent_id column: " . $e->getMessage() . "\n";
+                return;
+            }
+        }
+        
+        echo "Populating {$tableName} table from existing parent_id data...\n";
+        
+        try {
+            // Get all posts ordered by discussion and creation time
+            $posts = $connection->table('posts')
+                ->where('type', 'comment')
+                ->orderBy('discussion_id')
+                ->orderBy('created_at')
+                ->get();
+        } catch (\Exception $e) {
+            echo "Error fetching posts: " . $e->getMessage() . "\n";
+            return;
+        }
+        
+        $processedCount = 0;
+        $errorCount = 0;
+        
+        foreach ($posts as $post) {
+            try {
+                // Skip if thread entry already exists
+                $exists = $connection->table($tableName)
+                    ->where('post_id', $post->id)
+                    ->exists();
+                    
+                if ($exists) {
+                    continue;
+                }
+                
+                // Calculate thread data
+                $parentId = $post->parent_id;
+                $threadData = calculateThreadData($connection, $post, $parentId, $tableName);
+                
+                // Insert thread entry
+                $connection->table($tableName)->insert([
+                    'discussion_id' => $post->discussion_id,
+                    'post_id' => $post->id,
+                    'parent_post_id' => $parentId,
+                    'root_post_id' => $threadData['root_post_id'],
+                    'depth' => $threadData['depth'],
+                    'thread_path' => $threadData['thread_path'],
+                    'child_count' => 0, // Will be calculated after all posts are inserted
+                    'descendant_count' => 0, // Will be calculated after all posts are inserted
+                    'created_at' => $post->created_at,
+                    'updated_at' => $post->created_at, // Use created_at since updated_at may not exist
+                ]);
+                
+                $processedCount++;
+                
+                if ($processedCount % 100 === 0) {
+                    echo "Processed {$processedCount} posts...\n";
+                }
+                
+            } catch (\Exception $e) {
+                $errorCount++;
+                echo "Error processing post {$post->id}: " . $e->getMessage() . "\n";
+                
+                if ($errorCount > 10) {
+                    echo "Too many errors, stopping migration\n";
+                    return;
+                }
+            }
+        }
+        
+        echo "Phase 1 complete: Processed {$processedCount} posts with {$errorCount} errors\n";
+        
+        // Update thread counts
+        updateThreadCounts($connection, $tableName);
+        
+        echo "✅ Migration completed successfully!\n";
+    },
+    
+    'down' => function (Builder $schema) {
+        // Clear the threadify_threads table
+        $tableName = 'threadify_threads';
+        
+        try {
+            if ($schema->hasTable($tableName)) {
+                $schema->table($tableName, function (Blueprint $table) {
+                    $table->truncate();
+                });
+                echo "Cleared {$tableName} table\n";
+            }
+        } catch (\Exception $e) {
+            echo "Error truncating table {$tableName}: " . $e->getMessage() . "\n";
+        }
+    }
+]; 
