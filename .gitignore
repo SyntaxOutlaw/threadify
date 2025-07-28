@@ -2,8 +2,8 @@
 vendor/
 js/node_modules/
 
-# Compiled assets
-js/dist/
+# Compiled assets - NOT ignoring dist for Flarum extensions
+# js/dist/
 
 # Lock files (optional - you can choose to include these)
 js/package-lock.json

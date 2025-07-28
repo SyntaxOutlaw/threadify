@@ -32,6 +32,7 @@
             "SyntaxOutlaw\\Threadify\\": "src/"
         }
     },
+
     "extra": {
         "flarum-extension": {
             "title": "Threadify",
