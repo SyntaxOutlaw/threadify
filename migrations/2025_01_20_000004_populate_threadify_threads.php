@@ -55,31 +55,31 @@ function updateThreadCounts($connection, $tableName)
         // Check if table exists before proceeding
         $connection->table($tableName)->first();
         
-        // MySQL-compatible way to update child counts
-        $connection->statement("
-            UPDATE {$tableName} t1
-            INNER JOIN (
-                SELECT parent_post_id, COUNT(*) as count
-                FROM {$tableName} 
-                WHERE parent_post_id IS NOT NULL
-                GROUP BY parent_post_id
-            ) t2 ON t1.post_id = t2.parent_post_id
-            SET t1.child_count = t2.count
-        ");
+        // Update child counts using Laravel query builder
+        $childCounts = $connection->table($tableName)
+            ->selectRaw('parent_post_id, COUNT(*) as count')
+            ->whereNotNull('parent_post_id')
+            ->groupBy('parent_post_id')
+            ->get();
+            
+        foreach ($childCounts as $childCount) {
+            $connection->table($tableName)
+                ->where('post_id', $childCount->parent_post_id)
+                ->update(['child_count' => $childCount->count]);
+        }
         
-        // MySQL-compatible way to update descendant counts
-        $connection->statement("
-            UPDATE {$tableName} t1
-            INNER JOIN (
-                SELECT 
-                    SUBSTRING_INDEX(thread_path, '/', 1) as root_post_id,
-                    COUNT(*) - 1 as count
-                FROM {$tableName} 
-                GROUP BY SUBSTRING_INDEX(thread_path, '/', 1)
-            ) t2 ON t1.post_id = t2.root_post_id
-            SET t1.descendant_count = t2.count
-            WHERE t1.parent_post_id IS NULL
-        ");
+        // Update descendant counts for root posts
+        $rootCounts = $connection->table($tableName)
+            ->selectRaw('root_post_id, COUNT(*) - 1 as count')
+            ->groupBy('root_post_id')
+            ->get();
+            
+        foreach ($rootCounts as $rootCount) {
+            $connection->table($tableName)
+                ->where('post_id', $rootCount->root_post_id)
+                ->whereNull('parent_post_id')
+                ->update(['descendant_count' => $rootCount->count]);
+        }
         
         // For non-root posts, calculate descendants differently
         $threads = $connection->table($tableName)
