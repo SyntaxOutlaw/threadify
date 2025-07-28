@@ -120,7 +120,7 @@ return [
         
         // Check if the threadify_threads table exists by trying to query it
         try {
-            $connection->select("SELECT 1 FROM {$tableName} LIMIT 1");
+            $connection->table($tableName)->first();
             echo "✅ Table {$tableName} exists, proceeding with population.\n";
         } catch (\Exception $e) {
             echo "❌ Error: Table {$tableName} does not exist. Please ensure migration 2025_01_20_000003_create_threadify_threads_table.php has been run first.\n";
