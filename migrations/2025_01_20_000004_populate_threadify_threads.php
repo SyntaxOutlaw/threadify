@@ -114,12 +114,15 @@ return [
     
     'down' => function (Builder $schema) {
         // Clear the threadify_threads table
-        $connection = $schema->getConnection();
         $tableName = 'threadify_threads';
         
         try {
-            $connection->table($tableName)->truncate();
-            echo "Cleared {$tableName} table\n";
+            if ($schema->hasTable($tableName)) {
+                $schema->table($tableName, function (Blueprint $table) {
+                    $table->truncate();
+                });
+                echo "Cleared {$tableName} table\n";
+            }
         } catch (\Exception $e) {
             echo "Error clearing table: " . $e->getMessage() . "\n";
         }
