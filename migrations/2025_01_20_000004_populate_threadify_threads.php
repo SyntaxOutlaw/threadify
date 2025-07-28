@@ -2,7 +2,6 @@
 
 use Illuminate\Database\Schema\Builder;
 use Illuminate\Database\Schema\Blueprint;
-use SyntaxOutlaw\Threadify\Model\ThreadifyThread;
 
 return [
     'up' => function (Builder $schema) {
@@ -20,65 +19,14 @@ return [
         // Get the proper table name with prefix
         $tableName = $schema->getConnection()->getTablePrefix() . 'threadify_threads';
         
-        // Check if required Flarum tables exist
-        if (!$schema->hasTable('posts')) {
-            echo "Error: posts table does not exist. This extension requires Flarum to be properly installed.\n";
+        // Check if the threadify_threads table exists
+        try {
+            $connection->select("SELECT 1 FROM {$tableName} LIMIT 1");
+            echo "✅ Table {$tableName} exists, proceeding with population.\n";
+        } catch (\Exception $e) {
+            echo "❌ Error: Table {$tableName} does not exist. Please ensure migration 2025_01_20_000003_create_threadify_threads_table.php has been run first.\n";
             return;
         }
-        
-        if (!$schema->hasTable('discussions')) {
-            echo "Error: discussions table does not exist. This extension requires Flarum to be properly installed.\n";
-            return;
-        }
-        
-        // Ensure the threadify_threads table exists before proceeding
-        if (!$schema->hasTable('threadify_threads')) {
-            echo "Creating {$tableName} table first...\n";
-            
-            try {
-                // Create the table if it doesn't exist
-                $schema->create('threadify_threads', function ($table) {
-                    $table->id();
-                    $table->unsignedInteger('discussion_id');
-                    $table->unsignedInteger('post_id');
-                    $table->unsignedInteger('parent_post_id')->nullable();
-                    $table->unsignedInteger('root_post_id');
-                    $table->unsignedSmallInteger('depth')->default(0);
-                    $table->string('thread_path', 500);
-                    $table->unsignedInteger('child_count')->default(0);
-                    $table->unsignedInteger('descendant_count')->default(0);
-                    $table->timestamps();
-                    
-                                    // Foreign key constraints - only add if the referenced tables exist
-                if ($schema->hasTable('discussions')) {
-                    $table->foreign('discussion_id')->references('id')->on('discussions')->onDelete('cascade');
-                }
-                if ($schema->hasTable('posts')) {
-                    $table->foreign('post_id')->references('id')->on('posts')->onDelete('cascade');
-                    $table->foreign('parent_post_id')->references('id')->on('posts')->onDelete('cascade');
-                    $table->foreign('root_post_id')->references('id')->on('posts')->onDelete('cascade');
-                }
-                    
-                    // Indexes for performance
-                    $table->index('discussion_id');
-                    $table->index('post_id');
-                    $table->index('parent_post_id');
-                    $table->index('root_post_id');
-                    $table->index('thread_path');
-                    $table->index(['discussion_id', 'thread_path']); // Compound index for main query
-                    
-                    // Unique constraint - each post can only have one thread entry
-                    $table->unique('post_id');
-                });
-                
-                echo "threadify_threads table created successfully.\n";
-            } catch (\Exception $e) {
-                echo "Error creating threadify_threads table: " . $e->getMessage() . "\n";
-                return;
-            }
-        }
-        
-        echo "Populating threadify_threads table from existing parent_id data...\n";
         
         // Check if posts table has parent_id column
         if (!$schema->hasColumn('posts', 'parent_id')) {
@@ -95,6 +43,8 @@ return [
                 return;
             }
         }
+        
+        echo "Populating {$tableName} table from existing parent_id data...\n";
         
         try {
             // Get all posts ordered by discussion and creation time
@@ -158,14 +108,19 @@ return [
         echo "Calculating child and descendant counts...\n";
         updateThreadCounts($connection, $tableName);
         
-        echo "Migration completed successfully!\n";
+        echo "✅ Migration completed successfully!\n";
     },
     
     'down' => function (Builder $schema) {
-        // Drop the threadify_threads table completely
-        if ($schema->hasTable('threadify_threads')) {
-            $schema->drop('threadify_threads');
-            echo "Dropped threadify_threads table\n";
+        // Clear the threadify_threads table
+        $connection = $schema->getConnection();
+        $tableName = $connection->getTablePrefix() . 'threadify_threads';
+        
+        try {
+            $connection->table($tableName)->truncate();
+            echo "Cleared {$tableName} table\n";
+        } catch (\Exception $e) {
+            echo "Error clearing table: " . $e->getMessage() . "\n";
         }
     }
 ];
@@ -222,10 +177,7 @@ function updateThreadCounts($connection, $tableName)
 {
     try {
         // Check if table exists before proceeding
-        if (!$connection->getSchemaBuilder()->hasTable('threadify_threads')) {
-            echo "Error: {$tableName} table does not exist for count updates.\n";
-            return;
-        }
+        $connection->select("SELECT 1 FROM {$tableName} LIMIT 1");
         
         // MySQL-compatible way to update child counts
         $connection->statement("
