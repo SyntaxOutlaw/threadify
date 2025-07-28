@@ -116,7 +116,7 @@ return [
         }
         
         // Get the proper table name with prefix
-        $tableName = 'threadify_threads';
+        $tableName = $schema->getConnection()->getTablePrefix() . 'threadify_threads';
         
         // Check if the threadify_threads table exists by trying to query it
         try {
