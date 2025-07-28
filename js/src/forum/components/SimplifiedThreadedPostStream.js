@@ -23,6 +23,7 @@ import { loadDiscussionThreads, shouldUseThreadsApi } from '../utils/ThreadsApi'
 let threadsLoaded = false;
 let threadedPosts = null;
 let currentDiscussionId = null;
+let lastPostCount = 0; // Track last post count to detect updates
 
 /**
  * Initialize the simplified threaded PostStream
@@ -71,6 +72,29 @@ export function initSimplifiedThreadedPostStream() {
     }
   });
 
+  // Handle post stream updates to reload threads when new posts are added
+  extend(PostStream.prototype, 'onupdate', function() {
+    // Only check for updates if we're using threads API
+    if (!shouldUseThreadsApi(this.stream.discussion)) {
+      return;
+    }
+    
+    // Get current post count from the stream
+    const currentPosts = this.stream.posts();
+    const currentPostCount = currentPosts ? currentPosts.filter(p => p).length : 0;
+    
+    // If post count changed, reload threads
+    if (currentPostCount !== lastPostCount) {
+      console.log(`[Threadify] Post count changed: ${lastPostCount} -> ${currentPostCount}, reloading threads`);
+      lastPostCount = currentPostCount;
+      
+      // Reset and reload
+      threadsLoaded = false;
+      threadedPosts = null;
+      loadThreadedPosts(this);
+    }
+  });
+
   // Clean up when component is destroyed
   extend(PostStream.prototype, 'onremove', function() {
     console.log('[Threadify] PostStream being removed, cleaning up');
@@ -108,6 +132,9 @@ function loadThreadedPosts(postStream) {
       if (currentDiscussionId === discussionId) {
         threadedPosts = posts;
         threadsLoaded = true;
+        
+        // Update post count tracking
+        lastPostCount = posts ? posts.filter(p => p).length : 0;
         
         console.log(`[Threadify] Successfully loaded ${threadedPosts.length} threaded posts`);
         console.log('[Threadify] Sample post metadata:', threadedPosts[0] ? {
