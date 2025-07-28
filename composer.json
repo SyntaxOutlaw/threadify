@@ -54,6 +54,12 @@
         "source": "https://github.com/syntaxoutlaw/threadify",
         "docs": "https://github.com/syntaxoutlaw/threadify#readme"
     },
+    "funding": [
+        {
+            "type": "other",
+            "url": "https://coff.ee/syntaxoutlaw"
+        }
+    ],
     "minimum-stability": "stable",
     "prefer-stable": true
 }
