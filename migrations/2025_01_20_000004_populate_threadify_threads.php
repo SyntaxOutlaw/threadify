@@ -115,7 +115,7 @@ return [
     'down' => function (Builder $schema) {
         // Clear the threadify_threads table
         $connection = $schema->getConnection();
-        $tableName = 'threadify_threads';
+        $tableName = $connection->getTablePrefix() . 'threadify_threads';
         
         try {
             $connection->table($tableName)->truncate();
