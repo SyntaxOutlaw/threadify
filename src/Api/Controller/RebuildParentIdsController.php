@@ -45,7 +45,7 @@ class RebuildParentIdsController implements RequestHandlerInterface
         $results['parent_id_skipped'] = $skipped;
 
         // --- PART 2: Rebuild threadify_threads ---
-        $tableName = $db->getTablePrefix() . 'threadify_threads';
+        $tableName = 'threadify_threads';
         $db->table($tableName)->truncate();
         
         // First pass: Insert all posts with basic data

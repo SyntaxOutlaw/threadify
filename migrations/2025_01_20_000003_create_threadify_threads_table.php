@@ -17,7 +17,7 @@ return [
         }
         
         // Get the proper table name with prefix
-        $tableName = $schema->getConnection()->getTablePrefix() . 'threadify_threads';
+        $tableName = 'threadify_threads';
         
         // Check if required Flarum tables exist
         if (!$schema->hasTable('posts')) {
