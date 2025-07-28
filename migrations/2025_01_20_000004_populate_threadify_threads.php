@@ -217,13 +217,11 @@ return [
     
     'down' => function (Builder $schema) {
         // Clear the threadify_threads table
-        $tableName = 'threadify_threads';
+        $tableName = $schema->getConnection()->getTablePrefix() . 'threadify_threads';
         
         try {
             if ($schema->hasTable($tableName)) {
-                $schema->table($tableName, function (Blueprint $table) {
-                    $table->truncate();
-                });
+                $schema->getConnection()->table($tableName)->truncate();
                 echo "Cleared {$tableName} table\n";
             }
         } catch (\Exception $e) {
