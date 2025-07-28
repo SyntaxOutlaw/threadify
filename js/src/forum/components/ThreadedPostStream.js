@@ -16,13 +16,16 @@ import { extend } from 'flarum/common/extend';
 import PostStream from 'flarum/forum/components/PostStream';
 import { createThreadedPosts } from '../utils/ThreadTree';
 import { clearThreadDepthCache } from '../utils/ThreadDepth';
-import { loadCompleteThreadContext } from '../utils/PostLoader';
+import { loadMinimalChildren } from '../utils/PostLoader';
 
 // Global state for the PostStream threading system
 let isReordering = false; // Prevent infinite loops during reordering
 let reorderedPostsCache = null; // Cache for threaded posts arrangement
 let lastPostCount = 0; // Track post count to detect actual changes
-let originalPostsMethod = null; // Store reference to original posts method
+let originalPostsMethod = null;
+
+// Configuration flag for optional minimal child loading
+let enableMinimalChildLoading = false;
 
 /**
  * Initialize PostStream component extensions for threading
@@ -40,18 +43,29 @@ export function initThreadedPostStream() {
     
     // Override posts() method immediately, before any rendering
     this.stream.posts = () => {
-      // If we have threaded cache and we're not in the middle of reordering, return threaded posts
-      if (reorderedPostsCache && !isReordering) {
+      // If we have threaded cache, return it
+      if (reorderedPostsCache) {
+        console.log(`[Threadify] Returning threaded posts (${reorderedPostsCache.filter(p => p).length} posts)`);
         return reorderedPostsCache;
       }
       
-      // Otherwise return original posts (allows Flarum to add new posts normally)
-      return originalPostsMethod.call(this.stream);
+      // If no cache, return original posts and trigger rebuild
+      const originalPosts = originalPostsMethod.call(this.stream);
+      console.log(`[Threadify] No cache, returning original posts (${originalPosts ? originalPosts.filter(p => p).length : 0} posts)`);
+      
+      // Trigger cache rebuild if we have posts and not currently building
+      if (originalPosts && originalPosts.filter(p => p).length > 0 && !isReordering) {
+        console.log(`[Threadify] Triggering cache rebuild`);
+        updateReorderedCache(this);
+      }
+      
+      return originalPosts;
     };
     
     // Initialize post count for tracking changes using original method
     const currentPosts = originalPostsMethod.call(this.stream);
     lastPostCount = currentPosts ? currentPosts.filter(p => p).length : 0;
+    console.log(`[Threadify] Initial post count: ${lastPostCount}`);
     
     // Immediately build threaded cache if we have posts
     if (currentPosts && currentPosts.length > 0) {
@@ -87,6 +101,11 @@ export function initThreadedPostStream() {
  * @param {PostStream} postStream - The PostStream instance
  */
 function handlePostStreamUpdate(postStream) {
+  // Don't interfere if we're already reordering
+  if (isReordering) {
+    return;
+  }
+  
   // Check if post count actually changed using original posts method
   if (!originalPostsMethod) return; // No original method stored yet
   
@@ -95,29 +114,25 @@ function handlePostStreamUpdate(postStream) {
   
   // Only rebuild if post count changed (indicating new/removed posts)
   if (currentPostCount !== lastPostCount) {
+    console.log(`[Threadify] Post count changed: ${lastPostCount} -> ${currentPostCount}, rebuilding cache`);
+    
     // Update tracked count
     lastPostCount = currentPostCount;
     
-    // Clear old caches
+    // Clear old cache completely and rebuild with simple threading
     reorderedPostsCache = null;
     clearThreadDepthCache();
     
-    // Immediately rebuild cache with new posts
+    // Simple immediate rebuild without context loading
     updateReorderedCache(postStream);
-    
-    // Force a redraw to show the threaded layout
-    setTimeout(() => {
-      m.redraw();
-    }, 50);
   }
-  // If post count unchanged, do nothing (let normal updates proceed silently)
 }
 
 /**
- * Update the reordered posts cache with threaded arrangement
+ * Update the reordered posts cache with simple threaded arrangement
  * 
- * This is the core function that builds the threaded post cache.
- * It loads missing thread context and arranges posts in threaded order.
+ * Simplified approach: just do basic threading with current posts,
+ * with optional minimal child loading if enabled.
  * 
  * @param {PostStream} postStream - The PostStream instance
  */
@@ -150,70 +165,90 @@ function updateReorderedCache(postStream) {
       return;
     }
     
-    // Load complete thread context (missing parents and children)
-    loadCompleteThreadContext(postStream, validPosts)
-      .then((allPosts) => {
-        // Use all posts (including loaded parents AND children) for threading
-        const postsForThreading = allPosts || validPosts;
-        
-        // Create threaded arrangement
-        const reorderedPosts = createThreadedPosts(postsForThreading);
-        
-        // Create the final posts array maintaining original structure
-        const newPostsArray = createReorderedPostsArray(originalPosts, reorderedPosts);
-        
-        // Cache the reordered posts
-        reorderedPostsCache = newPostsArray;
-        
-        // Single redraw with everything loaded
-        if (allPosts && allPosts.length > validPosts.length) {
+    // Check if minimal child loading is enabled
+    if (enableMinimalChildLoading) {
+      // Load minimal children and then apply threading
+      loadMinimalChildren(postStream, validPosts)
+        .then((postsWithChildren) => {
+          if (!isReordering) return; // Skip if another rebuild started
+          
+          const threadedPosts = createThreadedPosts(postsWithChildren);
+          const threadedArray = createThreadedPostsArray(originalPosts, threadedPosts);
+          
+          reorderedPostsCache = threadedArray;
+          console.log(`[Threadify] Applied threading with minimal children (${threadedPosts.length} posts)`);
+          
           setTimeout(() => {
             m.redraw();
-          }, 0);
-        }
-      })
-      .catch(error => {
-        console.warn('[Threadify] Threading failed, using basic mode:', error);
-        
-        // Fallback: just do basic threading with current posts
-        const reorderedPosts = createThreadedPosts(validPosts);
-        const newPostsArray = createReorderedPostsArray(originalPosts, reorderedPosts);
-        
-        reorderedPostsCache = newPostsArray;
-      });
+          }, 10);
+        })
+        .catch(error => {
+          console.warn('[Threadify] Minimal child loading failed, using basic threading:', error);
+          // Fallback to basic threading
+          const threadedPosts = createThreadedPosts(validPosts);
+          const threadedArray = createThreadedPostsArray(originalPosts, threadedPosts);
+          reorderedPostsCache = threadedArray;
+        })
+        .finally(() => {
+          isReordering = false;
+        });
+    } else {
+      // Simple threading with current posts only - no context loading
+      const threadedPosts = createThreadedPosts(validPosts);
+      const threadedArray = createThreadedPostsArray(originalPosts, threadedPosts);
       
-  } finally {
+      // Update cache
+      reorderedPostsCache = threadedArray;
+      
+      console.log(`[Threadify] Applied simple threading (${threadedPosts.length} posts)`);
+      
+      // Force immediate redraw
+      setTimeout(() => {
+        m.redraw();
+      }, 10);
+      
+      isReordering = false;
+    }
+    
+  } catch (error) {
+    console.error('[Threadify] Cache update failed:', error);
     isReordering = false;
   }
 }
 
 /**
- * Create reordered posts array while maintaining original structure
+ * Create threaded posts array that preserves all loaded posts in threaded order
  * 
- * Takes the original posts array (with null entries for unloaded posts)
- * and the reordered posts, then creates a new array that maintains
- * the original structure but with posts in threaded order.
+ * Instead of trying to maintain original positions, this creates an array
+ * where posts appear in proper threaded order, followed by any null entries
+ * for unloaded posts (to maintain pagination).
  * 
  * @param {(Post|null)[]} originalPosts - Original posts array from PostStream
- * @param {Post[]} reorderedPosts - Posts in threaded order
- * @returns {(Post|null)[]} - New array with threaded order but original structure
+ * @param {Post[]} threadedPosts - Posts in threaded order
+ * @returns {(Post|null)[]} - Array with all posts in threaded order
  */
-function createReorderedPostsArray(originalPosts, reorderedPosts) {
-  const newPostsArray = [];
-  let reorderedIndex = 0;
+function createThreadedPostsArray(originalPosts, threadedPosts) {
+  if (!threadedPosts || threadedPosts.length === 0) {
+    return originalPosts;
+  }
   
-  originalPosts.forEach((originalPost, index) => {
-    if (originalPost) {
-      // Use the reordered post
-      newPostsArray[index] = reorderedPosts[reorderedIndex] || originalPost;
-      reorderedIndex++;
-    } else {
-      // Keep null entries as-is for unloaded posts
-      newPostsArray[index] = null;
-    }
-  });
+  // Start with all threaded posts in their correct order
+  const result = [...threadedPosts];
   
-  return newPostsArray;
+  // Count how many non-null posts were in the original array
+  const originalNonNullCount = originalPosts.filter(p => p !== null).length;
+  
+  // If we have more threaded posts than original non-null posts,
+  // it means we loaded additional parent/child posts - that's great!
+  // If we have fewer, we need to pad with nulls to maintain pagination
+  const nullsNeeded = Math.max(0, originalPosts.length - threadedPosts.length);
+  
+  // Add null entries at the end to maintain original array length for pagination
+  for (let i = 0; i < nullsNeeded; i++) {
+    result.push(null);
+  }
+  
+  return result;
 }
 
 /**
@@ -234,11 +269,13 @@ export function getThreadedPostsCache() {
  * @param {PostStream} postStream - The PostStream instance
  */
 export function forceRebuildCache(postStream) {
-  // Clear existing cache
+  console.log('[Threadify] Force rebuilding cache');
+  
+  // Clear existing cache and depth cache
   reorderedPostsCache = null;
   clearThreadDepthCache();
   
-  // Rebuild cache
+  // Use the simplified rebuild approach
   updateReorderedCache(postStream);
 }
 
@@ -264,4 +301,42 @@ export function getThreadingStats() {
     lastPostCount: lastPostCount,
     hasOriginalMethod: !!originalPostsMethod
   };
+} 
+
+/**
+ * Get debug information about the current threading state
+ * 
+ * @returns {Object} - Debug information object
+ */
+export function getThreadingDebugInfo() {
+  return {
+    isReordering: isReordering,
+    hasCachedPosts: !!reorderedPostsCache,
+    cachedPostCount: reorderedPostsCache ? reorderedPostsCache.filter(p => p).length : 0,
+    lastPostCount: lastPostCount,
+    hasOriginalMethod: !!originalPostsMethod
+  };
+}
+
+/**
+ * Log detailed threading debug information
+ */
+export function logThreadingDebug() {
+  const info = getThreadingDebugInfo();
+  console.log('[Threadify] Debug Info:', info);
+  
+  if (reorderedPostsCache) {
+    const posts = reorderedPostsCache.filter(p => p);
+    console.log('[Threadify] Cache contains posts:', posts.map(p => `#${p.id()} (parent: ${p.attribute('parent_id') || 'none'})`));
+  }
+} 
+
+/**
+ * Enable or disable minimal child loading
+ * 
+ * @param {boolean} enabled - Whether to enable minimal child loading
+ */
+export function setMinimalChildLoading(enabled) {
+  enableMinimalChildLoading = enabled;
+  console.log(`[Threadify] Minimal child loading ${enabled ? 'enabled' : 'disabled'}`);
 } 

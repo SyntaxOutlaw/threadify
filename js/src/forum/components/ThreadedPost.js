@@ -12,7 +12,7 @@
 
 import { extend } from 'flarum/common/extend';
 import Post from 'flarum/forum/components/Post';
-import { getThreadCssClasses } from '../utils/ThreadDepth';
+import { getThreadCssClasses } from '../utils/SimplifiedThreadDepth';
 
 /**
  * Initialize Post component extensions for threading
@@ -26,14 +26,15 @@ export function initThreadedPost() {
     const post = this.attrs.post;
     
     // Skip processing if we don't have a valid post
-    if (!post) return classes;
+    if (!post) {
+      console.warn('[Threadify] No post in ThreadedPost.classes');
+      return classes;
+    }
     
-    // Get all posts in the discussion for depth calculation context
-    const discussion = post.discussion();
-    const allPosts = discussion && discussion.posts ? discussion.posts() : [];
+    // Get threading CSS classes from simplified utility
+    const threadClasses = getThreadCssClasses(post);
+    console.log(`[Threadify] Adding classes to post ${post.id()}: ${threadClasses.join(', ')}`);
     
-    // Get threading CSS classes and add them to the post
-    const threadClasses = getThreadCssClasses(post, allPosts);
     threadClasses.forEach(className => {
       classes.push(className);
     });

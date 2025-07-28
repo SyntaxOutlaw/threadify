@@ -3,6 +3,8 @@
 namespace SyntaxOutlaw\Threadify\Listener;
 
 use Flarum\Post\Event\Saving;
+use Flarum\Post\Event\Saved;
+use SyntaxOutlaw\Threadify\Model\ThreadifyThread;
 
 class SavePostParentId
 {
@@ -40,5 +42,38 @@ class SavePostParentId
         }
         
         error_log("[Threadify] 🎯 SavePostParentId listener finished");
+    }
+}
+
+class SavePostToThreadifyTable
+{
+    public function handle(Saved $event)
+    {
+        $post = $event->post;
+        
+        // Only handle comment posts, not other post types
+        if ($post->type !== 'comment') {
+            return;
+        }
+        
+        error_log("[Threadify] 📝 Creating/updating thread entry for post {$post->id}");
+        
+        try {
+            // Check if thread entry already exists
+            $existingThread = ThreadifyThread::where('post_id', $post->id)->first();
+            
+            if ($existingThread) {
+                error_log("[Threadify] Thread entry already exists for post {$post->id}, skipping");
+                return;
+            }
+            
+            // Create new thread entry
+            $threadEntry = ThreadifyThread::createForPost($post, $post->parent_id);
+            
+            error_log("[Threadify] ✅ Created thread entry: post={$post->id}, parent={$post->parent_id}, depth={$threadEntry->depth}, path={$threadEntry->thread_path}");
+            
+        } catch (\Exception $e) {
+            error_log("[Threadify] ❌ Failed to create thread entry for post {$post->id}: " . $e->getMessage());
+        }
     }
 }

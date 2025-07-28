@@ -91,10 +91,12 @@ export function loadMissingChildren(postStream, currentPosts) {
     return Promise.resolve(currentPosts);
   }
   
-  // Load a sample of recent unloaded posts to check for parent relationships
-  // We sample to avoid loading too many posts at once
-  const sampleSize = Math.min(30, unloadedPostIds.length);
+  // Be more conservative - only load a small sample of recent posts
+  // This reduces the "janky reloading" by not loading too many posts at once
+  const sampleSize = Math.min(10, unloadedPostIds.length); // Reduced from 30 to 10
   const recentUnloaded = unloadedPostIds.slice(-sampleSize); // Get most recent posts
+  
+  console.log(`[Threadify] Checking ${sampleSize} recent unloaded posts for children`);
   
   // Load sample posts to check if any are children of visible posts
   return loadPostsByIds(recentUnloaded)
@@ -105,12 +107,15 @@ export function loadMissingChildren(postStream, currentPosts) {
         return parentId && currentPostIds.includes(String(parentId));
       });
       
+      console.log(`[Threadify] Found ${actualChildren.length} actual children from sample`);
+      
       if (actualChildren.length > 0) {
         // Add the children to our current posts
         const allPostsWithChildren = [...currentPosts, ...actualChildren];
         
-        // Recursively check if these children also have children  
-        return loadMissingChildren(postStream, allPostsWithChildren);
+        // Don't recursively check for more children to avoid excessive loading
+        // This prevents the cascade of API calls that causes "janky reloading"
+        return allPostsWithChildren;
       } else {
         return currentPosts;
       }
@@ -140,6 +145,64 @@ export function loadCompleteThreadContext(postStream, posts) {
     .catch(error => {
       console.warn('[Threadify] Failed to load thread context:', error);
       return posts; // Fallback to original posts
+    });
+}
+
+/**
+ * Load only missing child posts (conservative approach)
+ * 
+ * Much more conservative than loadCompleteThreadContext - only loads
+ * a small number of recent children, no parents, no recursion.
+ * 
+ * @param {PostStream} postStream - The PostStream instance
+ * @param {Post[]} currentPosts - Currently loaded posts
+ * @returns {Promise<Post[]>} - Promise resolving to posts with minimal children added
+ */
+export function loadMinimalChildren(postStream, currentPosts) {
+  const currentPostIds = currentPosts.map(p => p.id());
+  
+  if (currentPostIds.length === 0) {
+    return Promise.resolve(currentPosts);
+  }
+  
+  // Get all post IDs in the discussion
+  const discussionPostIds = postStream.discussion.postIds();
+  const loadedPostIdSet = new Set(currentPostIds.map(id => String(id)));
+  
+  // Find unloaded posts that might be children
+  const unloadedPostIds = discussionPostIds.filter(id => !loadedPostIdSet.has(String(id)));
+  
+  if (unloadedPostIds.length === 0) {
+    return Promise.resolve(currentPosts);
+  }
+  
+  // Be very conservative - only load a tiny sample of the most recent posts
+  const sampleSize = Math.min(5, unloadedPostIds.length); // Very small sample
+  const recentUnloaded = unloadedPostIds.slice(-sampleSize);
+  
+  console.log(`[Threadify] Checking only ${sampleSize} recent posts for children`);
+  
+  // Load sample posts to check if any are children of visible posts
+  return loadPostsByIds(recentUnloaded)
+    .then(loadedSamplePosts => {
+      // Filter for posts that are actually children of currently visible posts
+      const actualChildren = loadedSamplePosts.filter(post => {
+        const parentId = post.attribute('parent_id');
+        return parentId && currentPostIds.includes(String(parentId));
+      });
+      
+      console.log(`[Threadify] Found ${actualChildren.length} children from minimal sample`);
+      
+      if (actualChildren.length > 0) {
+        // Add the children to our current posts (no recursion)
+        return [...currentPosts, ...actualChildren];
+      } else {
+        return currentPosts;
+      }
+    })
+    .catch(error => {
+      console.warn('[Threadify] Minimal child loading failed:', error);
+      return currentPosts;
     });
 }
 

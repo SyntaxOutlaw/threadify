@@ -20,7 +20,7 @@
  */
 
 // Import utility modules
-import { initThreadedPostStream } from './components/ThreadedPostStream';
+import { initSimplifiedThreadedPostStream, getThreadingState, reloadThreads, isThreadingActive } from './components/SimplifiedThreadedPostStream';
 import { initThreadedPost } from './components/ThreadedPost';
 import { initThreadedReplyComposer } from './components/ThreadedReplyComposer';
 
@@ -32,12 +32,33 @@ import { initThreadedReplyComposer } from './components/ThreadedReplyComposer';
  */
 app.initializers.add('syntaxoutlaw-threadify', () => {
   try {
-    // Initialize all threading components
-    initThreadedPostStream();  // Core post reordering and caching
-    initThreadedPost();        // Post CSS classes and visual elements  
-    initThreadedReplyComposer(); // Parent ID extraction from mentions
+    // Initialize all threading components with simplified API-based approach
+    initSimplifiedThreadedPostStream();  // Simplified post threading via API
+    initThreadedPost();                  // Post CSS classes and visual elements  
+    initThreadedReplyComposer();         // Parent ID extraction from mentions
     
-    console.log('[Threadify] Extension loaded');
+    console.log('[Threadify] Simplified extension loaded');
+    
+    // Add global debugging utilities for troubleshooting
+    window.threadifyDebug = {
+      getState: getThreadingState,
+      reload: reloadThreads,
+      isActive: isThreadingActive,
+      help: () => {
+        console.log(`
+[Threadify] Simplified Debug Commands:
+- threadifyDebug.getState() - Get current threading state
+- threadifyDebug.reload() - Force reload threads for current discussion
+- threadifyDebug.isActive() - Check if threading is currently active
+- threadifyDebug.help() - Show this help
+
+New System: Uses pre-computed threads from backend API
+- Single API call instead of complex frontend logic
+- Pre-computed thread paths and depths
+- Much more reliable and performant
+        `);
+      }
+    };
     
   } catch (error) {
     console.error('[Threadify] Failed to initialize:', error);
