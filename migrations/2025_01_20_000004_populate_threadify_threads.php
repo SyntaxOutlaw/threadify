@@ -53,7 +53,7 @@ function updateThreadCounts($connection, $tableName)
 {
     try {
         // Check if table exists before proceeding
-        $connection->select("SELECT 1 FROM {$tableName} LIMIT 1");
+        $connection->table($tableName)->first();
         
         // MySQL-compatible way to update child counts
         $connection->statement("
