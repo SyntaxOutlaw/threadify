@@ -116,7 +116,7 @@ return [
         }
         
         // Get the proper table name with prefix
-        $tableName = $schema->getConnection()->getTablePrefix() . 'threadify_threads';
+        $tableName = 'threadify_threads';
         
         // Check if the threadify_threads table exists by trying to query it
         try {
@@ -217,7 +217,7 @@ return [
     
     'down' => function (Builder $schema) {
         // Clear the threadify_threads table
-        $tableName = $schema->getConnection()->getTablePrefix() . 'threadify_threads';
+        $tableName = 'threadify_threads';
         
         try {
             if ($schema->hasTable($tableName)) {
