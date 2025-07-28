@@ -6,11 +6,34 @@ use SyntaxOutlaw\Threadify\Model\ThreadifyThread;
 
 return [
     'up' => function (Builder $schema) {
-        $connection = $schema->getConnection();
+        try {
+            $connection = $schema->getConnection();
+            
+            // Test database connection
+            $connection->getPdo();
+            echo "Database connection successful\n";
+        } catch (\Exception $e) {
+            echo "Error connecting to database: " . $e->getMessage() . "\n";
+            return;
+        }
+        
+        // Get the proper table name with prefix
+        $tableName = $schema->getConnection()->getTablePrefix() . 'threadify_threads';
+        
+        // Check if required Flarum tables exist
+        if (!$schema->hasTable('posts')) {
+            echo "Error: posts table does not exist. This extension requires Flarum to be properly installed.\n";
+            return;
+        }
+        
+        if (!$schema->hasTable('discussions')) {
+            echo "Error: discussions table does not exist. This extension requires Flarum to be properly installed.\n";
+            return;
+        }
         
         // Ensure the threadify_threads table exists before proceeding
         if (!$schema->hasTable('threadify_threads')) {
-            echo "Creating threadify_threads table first...\n";
+            echo "Creating {$tableName} table first...\n";
             
             try {
                 // Create the table if it doesn't exist
@@ -26,11 +49,15 @@ return [
                     $table->unsignedInteger('descendant_count')->default(0);
                     $table->timestamps();
                     
-                    // Foreign key constraints
+                                    // Foreign key constraints - only add if the referenced tables exist
+                if ($schema->hasTable('discussions')) {
                     $table->foreign('discussion_id')->references('id')->on('discussions')->onDelete('cascade');
+                }
+                if ($schema->hasTable('posts')) {
                     $table->foreign('post_id')->references('id')->on('posts')->onDelete('cascade');
                     $table->foreign('parent_post_id')->references('id')->on('posts')->onDelete('cascade');
                     $table->foreign('root_post_id')->references('id')->on('posts')->onDelete('cascade');
+                }
                     
                     // Indexes for performance
                     $table->index('discussion_id');
@@ -56,7 +83,17 @@ return [
         // Check if posts table has parent_id column
         if (!$schema->hasColumn('posts', 'parent_id')) {
             echo "Error: posts table does not have parent_id column. Please ensure migration 2025_01_20_000001_add_parent_id_to_posts.php has been run first.\n";
-            return;
+            echo "Attempting to add parent_id column...\n";
+            
+            try {
+                $schema->table('posts', function (Blueprint $table) {
+                    $table->unsignedInteger('parent_id')->nullable()->after('discussion_id');
+                });
+                echo "Successfully added parent_id column to posts table\n";
+            } catch (\Exception $e) {
+                echo "Error adding parent_id column: " . $e->getMessage() . "\n";
+                return;
+            }
         }
         
         try {
@@ -77,7 +114,7 @@ return [
         foreach ($posts as $post) {
             try {
                 // Skip if thread entry already exists
-                $exists = $connection->table('threadify_threads')
+                $exists = $connection->table($tableName)
                     ->where('post_id', $post->id)
                     ->exists();
                     
@@ -87,10 +124,10 @@ return [
                 
                 // Calculate thread data
                 $parentId = $post->parent_id;
-                $threadData = calculateThreadData($connection, $post, $parentId);
+                $threadData = calculateThreadData($connection, $post, $parentId, $tableName);
                 
                 // Insert thread entry
-                $connection->table('threadify_threads')->insert([
+                $connection->table($tableName)->insert([
                     'discussion_id' => $post->discussion_id,
                     'post_id' => $post->id,
                     'parent_post_id' => $parentId,
@@ -119,7 +156,7 @@ return [
         
         // Phase 2: Update child and descendant counts
         echo "Calculating child and descendant counts...\n";
-        updateThreadCounts($connection);
+        updateThreadCounts($connection, $tableName);
         
         echo "Migration completed successfully!\n";
     },
@@ -136,7 +173,7 @@ return [
 /**
  * Calculate thread data for a post
  */
-function calculateThreadData($connection, $post, $parentId)
+function calculateThreadData($connection, $post, $parentId, $tableName)
 {
     if (!$parentId) {
         // Root post
@@ -149,7 +186,7 @@ function calculateThreadData($connection, $post, $parentId)
     
     try {
         // Find parent thread data
-        $parentThread = $connection->table('threadify_threads')
+        $parentThread = $connection->table($tableName)
             ->where('post_id', $parentId)
             ->first();
         
@@ -181,21 +218,21 @@ function calculateThreadData($connection, $post, $parentId)
 /**
  * Update child and descendant counts for all thread entries
  */
-function updateThreadCounts($connection)
+function updateThreadCounts($connection, $tableName)
 {
     try {
         // Check if table exists before proceeding
         if (!$connection->getSchemaBuilder()->hasTable('threadify_threads')) {
-            echo "Error: threadify_threads table does not exist for count updates.\n";
+            echo "Error: {$tableName} table does not exist for count updates.\n";
             return;
         }
         
         // MySQL-compatible way to update child counts
         $connection->statement("
-            UPDATE threadify_threads t1
+            UPDATE {$tableName} t1
             INNER JOIN (
                 SELECT parent_post_id, COUNT(*) as count
-                FROM threadify_threads 
+                FROM {$tableName} 
                 WHERE parent_post_id IS NOT NULL
                 GROUP BY parent_post_id
             ) t2 ON t1.post_id = t2.parent_post_id
@@ -204,12 +241,12 @@ function updateThreadCounts($connection)
         
         // MySQL-compatible way to update descendant counts
         $connection->statement("
-            UPDATE threadify_threads t1
+            UPDATE {$tableName} t1
             INNER JOIN (
                 SELECT 
                     SUBSTRING_INDEX(thread_path, '/', 1) as root_post_id,
                     COUNT(*) - 1 as count
-                FROM threadify_threads 
+                FROM {$tableName} 
                 GROUP BY SUBSTRING_INDEX(thread_path, '/', 1)
             ) t2 ON t1.post_id = t2.root_post_id
             SET t1.descendant_count = t2.count
@@ -217,16 +254,16 @@ function updateThreadCounts($connection)
         ");
         
         // For non-root posts, calculate descendants differently
-        $threads = $connection->table('threadify_threads')
+        $threads = $connection->table($tableName)
             ->where('parent_post_id', '!=', null)
             ->get();
             
         foreach ($threads as $thread) {
-            $descendantCount = $connection->table('threadify_threads')
+            $descendantCount = $connection->table($tableName)
                 ->where('thread_path', 'LIKE', $thread->thread_path . '/%')
                 ->count();
                 
-            $connection->table('threadify_threads')
+            $connection->table($tableName)
                 ->where('id', $thread->id)
                 ->update(['descendant_count' => $descendantCount]);
         }

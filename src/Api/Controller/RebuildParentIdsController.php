@@ -45,7 +45,8 @@ class RebuildParentIdsController implements RequestHandlerInterface
         $results['parent_id_skipped'] = $skipped;
 
         // --- PART 2: Rebuild threadify_threads ---
-        $db->table('threadify_threads')->truncate();
+        $tableName = $db->getTablePrefix() . 'threadify_threads';
+        $db->table($tableName)->truncate();
         
         // First pass: Insert all posts with basic data
         $posts = $db->table('posts')
@@ -59,8 +60,8 @@ class RebuildParentIdsController implements RequestHandlerInterface
         foreach ($posts as $post) {
             try {
                 $parentId = $post->parent_id;
-                $threadData = self::calculateThreadData($db, $post, $parentId);
-                $db->table('threadify_threads')->insert([
+                $threadData = self::calculateThreadData($db, $post, $parentId, $tableName);
+                $db->table($tableName)->insert([
                     'discussion_id' => $post->discussion_id,
                     'post_id' => $post->id,
                     'parent_post_id' => $parentId,
@@ -83,10 +84,10 @@ class RebuildParentIdsController implements RequestHandlerInterface
         // --- PART 3: Update child and descendant counts ---
         // Update child counts
         $db->statement("
-            UPDATE threadify_threads t1
+            UPDATE {$tableName} t1
             INNER JOIN (
                 SELECT parent_post_id, COUNT(*) as count
-                FROM threadify_threads 
+                FROM {$tableName} 
                 WHERE parent_post_id IS NOT NULL
                 GROUP BY parent_post_id
             ) t2 ON t1.post_id = t2.parent_post_id
@@ -95,12 +96,12 @@ class RebuildParentIdsController implements RequestHandlerInterface
         
         // Update descendant counts for root posts
         $db->statement("
-            UPDATE threadify_threads t1
+            UPDATE {$tableName} t1
             INNER JOIN (
                 SELECT 
                     root_post_id,
                     COUNT(*) - 1 as count
-                FROM threadify_threads 
+                FROM {$tableName} 
                 GROUP BY root_post_id
             ) t2 ON t1.post_id = t2.root_post_id
             SET t1.descendant_count = t2.count
@@ -137,7 +138,7 @@ class RebuildParentIdsController implements RequestHandlerInterface
         return null;
     }
 
-    private static function calculateThreadData($db, $post, $parentId)
+    private static function calculateThreadData($db, $post, $parentId, $tableName)
     {
         if (!$parentId) {
             return [

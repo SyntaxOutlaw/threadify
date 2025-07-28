@@ -10,6 +10,14 @@ class ThreadifyThread extends AbstractModel
 {
     protected $table = 'threadify_threads';
     
+    /**
+     * Get the table name with proper prefix
+     */
+    public function getTable()
+    {
+        return $this->getConnection()->getTablePrefix() . 'threadify_threads';
+    }
+    
     protected $fillable = [
         'discussion_id',
         'post_id', 
