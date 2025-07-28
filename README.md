@@ -1,14 +1,18 @@
 # Threadify for Flarum
 
+![License](https://img.shields.io/github/license/syntaxoutlaw/threadify) ![Packagist Version](https://img.shields.io/packagist/v/syntaxoutlaw/threadify)
+![Packagist Downloads](https://img.shields.io/packagist/dt/syntaxoutlaw/threadify)![https://coff.ee/syntaxoutlaw](https://img.shields.io/badge/Buy_Me_A_Coffee-green?link=https://coff.ee%2Fsyntaxoutlaw)
+
+
 A Flarum extension that adds **threaded discussions** with visual indentation to your forum, making complex conversations easier to follow.
 
 ## 🚀 Features
 
 - **Multi-level nested threading** with distinct colors and indentation for each depth
-- **Smart post loading** - automatically loads missing parent/child posts for complete threading
+- **Pre-computed thread structure** - efficient backend thread calculation and storage
 - **Real-time updates** - new replies appear in correct threaded positions instantly
-- **Mobile-optimized** responsive design with compact spacing
-- **Seamless integration** - uses existing Flarum mentions, no new UI needed
+- **Seamless integration** - uses existing Flarum mentions
+- **Works on existing discussions** - will also create threads for past discussions
 
 ## 📋 Requirements
 
@@ -18,9 +22,6 @@ A Flarum extension that adds **threaded discussions** with visual indentation to
 
 ## 👀 Preview:
 ![Threadify Preview](threadify.png)
-
-
-
 
 ## 🔧 Installation
 
@@ -46,21 +47,25 @@ Threading works automatically using Flarum's mentions extension:
 
 ## ⚙️ How It Works
 
-**Backend (PHP)**
-- Adds a `parent_id` column to posts table via migration
-- Listens for new posts and extracts parent relationships from mention format `@"Name"#p123`
+### Backend (PHP)
+- **Database Structure**: 
+  - Adds `parent_id` column to posts table for basic parent-child relationships
+  - Creates `threadify_threads` table for advanced thread metadata (depth, path, counts)
+- **Thread Processing**: 
+  - Listens for new posts and extracts parent relationships from mention format `@"Name"#p123`
+  - Pre-computes thread depth, path, and descendant counts for efficient frontend rendering
+  - Maintains thread hierarchy with proper indexing for fast queries
+- **API Endpoints**:
+  - `/discussions/{id}/threads` - Returns complete thread structure with metadata
+  - `/threadify/admin/rebuild-parent-ids` - Admin tool for rebuilding thread relationships
 
-**Frontend (JavaScript)**  
-- Intercepts the PostStream to reorder posts into threaded hierarchy
-- Builds parent-child tree structures and flattens them back to linear threaded order
-- Surgically loads missing parent/child posts with targeted API calls for complete threading
-- Applies CSS classes for visual depth styling
-
-**Visual Styling**
-- Each thread depth gets unique color (blue → green → orange → red → purple...)
-- Progressive indentation
-- Subtle background colors for threaded posts
-
+### Frontend (JavaScript)
+- **Thread Tree Building**: 
+  - Uses pre-computed thread metadata from backend API
+  - Builds parent-child tree structures and flattens them to linear threaded order
+- **Visual Styling**: 
+  - Applies CSS classes for visual depth styling (`thread-depth-1`, `thread-depth-2`, etc.)
+  - Progressive indentation with color-coded depth indicators
 
 
 ## 🔍 Troubleshooting
@@ -68,16 +73,12 @@ Threading works automatically using Flarum's mentions extension:
 - **Threading not working?** Ensure `flarum/mentions` extension is enabled
 - **Posts not loading?** Check browser console for errors and run `php flarum cache:clear`
 - **Visual issues?** Run `php flarum assets:publish` and clear browser cache
+- **Database issues?** Run `php flarum migrate` to ensure all migrations are applied
 
 ## 📝 License
 
 MIT License - see [LICENSE](LICENSE) file for details.
 
-## 🙏 Dependencies
 
-- **Flarum Mentions Extension** - Provides the `@"username"#p123` format that enables threading
-- **Flarum Core** - Uses PostStream, Post components, and store API for post management
-
----
 
 **Made with ❤️ for the Flarum community** 
