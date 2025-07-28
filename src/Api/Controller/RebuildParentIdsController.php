@@ -2,19 +2,19 @@
 
 namespace SyntaxOutlaw\Threadify\Api\Controller;
 
-use Flarum\Admin\Controller\AbstractAdminController;
+use Flarum\Http\RequestUtil;
+use Psr\Http\Message\ResponseInterface;
 use Psr\Http\Message\ServerRequestInterface;
+use Psr\Http\Server\RequestHandlerInterface;
 use Laminas\Diactoros\Response\JsonResponse;
 use Illuminate\Database\ConnectionInterface;
 
-class RebuildParentIdsController extends AbstractAdminController
+class RebuildParentIdsController implements RequestHandlerInterface
 {
-    protected function handle(ServerRequestInterface $request)
+    public function handle(ServerRequestInterface $request): ResponseInterface
     {
-        $actor = $request->getAttribute('actor');
-        if (!$actor || !$actor->isAdmin()) {
-            return new JsonResponse(['error' => 'Permission denied'], 403);
-        }
+        $actor = RequestUtil::getActor($request);
+        $actor->assertAdmin();
 
         $db = resolve(ConnectionInterface::class);
         $results = [];
@@ -46,6 +46,8 @@ class RebuildParentIdsController extends AbstractAdminController
 
         // --- PART 2: Rebuild threadify_threads ---
         $db->table('threadify_threads')->truncate();
+        
+        // First pass: Insert all posts with basic data
         $posts = $db->table('posts')
             ->where('type', 'comment')
             ->orderBy('discussion_id')
@@ -53,6 +55,7 @@ class RebuildParentIdsController extends AbstractAdminController
             ->get();
         $processedCount = 0;
         $errorCount = 0;
+        
         foreach ($posts as $post) {
             try {
                 $parentId = $post->parent_id;
@@ -78,7 +81,7 @@ class RebuildParentIdsController extends AbstractAdminController
         $results['threads_errors'] = $errorCount;
 
         // --- PART 3: Update child and descendant counts ---
-        // (copied from migration)
+        // Update child counts
         $db->statement("
             UPDATE threadify_threads t1
             INNER JOIN (
@@ -89,18 +92,22 @@ class RebuildParentIdsController extends AbstractAdminController
             ) t2 ON t1.post_id = t2.parent_post_id
             SET t1.child_count = t2.count
         ");
+        
+        // Update descendant counts for root posts
         $db->statement("
             UPDATE threadify_threads t1
             INNER JOIN (
                 SELECT 
-                    SUBSTRING_INDEX(thread_path, '/', 1) as root_post_id,
+                    root_post_id,
                     COUNT(*) - 1 as count
                 FROM threadify_threads 
-                GROUP BY SUBSTRING_INDEX(thread_path, '/', 1)
+                GROUP BY root_post_id
             ) t2 ON t1.post_id = t2.root_post_id
             SET t1.descendant_count = t2.count
             WHERE t1.parent_post_id IS NULL
         ");
+        
+        // Update descendant counts for non-root posts
         $threads = $db->table('threadify_threads')->whereNotNull('parent_post_id')->get();
         foreach ($threads as $thread) {
             $descendantCount = $db->table('threadify_threads')
@@ -139,20 +146,83 @@ class RebuildParentIdsController extends AbstractAdminController
                 'thread_path' => (string) $post->id
             ];
         }
-        $parentThread = $db->table('threadify_threads')
-            ->where('post_id', $parentId)
+        
+        // Find the parent post to get its thread data
+        $parentPost = $db->table('posts')
+            ->where('id', $parentId)
             ->first();
-        if (!$parentThread) {
+            
+        if (!$parentPost) {
             return [
                 'root_post_id' => $post->id,
                 'depth' => 0,
                 'thread_path' => (string) $post->id
             ];
         }
+        
+        // If parent has no parent_id, it's a root post
+        if (!$parentPost->parent_id) {
+            return [
+                'root_post_id' => $parentId,
+                'depth' => 1,
+                'thread_path' => $parentId . '/' . $post->id
+            ];
+        }
+        
+        // Recursively find the root post
+        $rootPostId = self::findRootPostId($db, $parentId);
+        $depth = self::calculateDepth($db, $parentId) + 1;
+        $threadPath = self::buildThreadPath($db, $parentId) . '/' . $post->id;
+        
         return [
-            'root_post_id' => $parentThread->root_post_id,
-            'depth' => $parentThread->depth + 1,
-            'thread_path' => $parentThread->thread_path . '/' . $post->id
+            'root_post_id' => $rootPostId,
+            'depth' => $depth,
+            'thread_path' => $threadPath
         ];
+    }
+    
+    private static function findRootPostId($db, $postId)
+    {
+        $currentPostId = $postId;
+        while (true) {
+            $post = $db->table('posts')->where('id', $currentPostId)->first();
+            if (!$post || !$post->parent_id) {
+                return $currentPostId;
+            }
+            $currentPostId = $post->parent_id;
+        }
+    }
+    
+    private static function calculateDepth($db, $postId)
+    {
+        $depth = 0;
+        $currentPostId = $postId;
+        while (true) {
+            $post = $db->table('posts')->where('id', $currentPostId)->first();
+            if (!$post || !$post->parent_id) {
+                break;
+            }
+            $depth++;
+            $currentPostId = $post->parent_id;
+        }
+        return $depth;
+    }
+    
+    private static function buildThreadPath($db, $postId)
+    {
+        $path = [];
+        $currentPostId = $postId;
+        while (true) {
+            $post = $db->table('posts')->where('id', $currentPostId)->first();
+            if (!$post) {
+                break;
+            }
+            array_unshift($path, $currentPostId);
+            if (!$post->parent_id) {
+                break;
+            }
+            $currentPostId = $post->parent_id;
+        }
+        return implode('/', $path);
     }
 } 
