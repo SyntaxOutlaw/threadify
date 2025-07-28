@@ -3,8 +3,28 @@
     "description": "A Flarum extension that adds threaded discussions with visual indentation to your forum, making complex conversations easier to follow.",
     "type": "flarum-extension",
     "license": "MIT",
+    "keywords": [
+        "flarum",
+        "extension",
+        "threading",
+        "discussions",
+        "forum",
+        "nested",
+        "replies"
+    ],
+    "authors": [
+        {
+            "name": "SyntaxOutlaw",
+            "email": "joel@graycode.ie",
+            "homepage": "https://github.com/syntaxoutlaw"
+        }
+    ],
     "require": {
-        "flarum/core": "^1.8.0"
+        "flarum/core": "^1.8.0",
+        "flarum/mentions": "^1.8.0"
+    },
+    "require-dev": {
+        "flarum/testing": "^1.8.0"
     },
     "autoload": {
         "psr-4": {
@@ -20,6 +40,18 @@
                 "backgroundColor": "#4D698E",
                 "color": "#fff"
             }
+        },
+        "flarum-cli": {
+            "modules": {
+                "js": "js/dist"
+            }
         }
-    }
+    },
+    "support": {
+        "issues": "https://github.com/syntaxoutlaw/threadify/issues",
+        "source": "https://github.com/syntaxoutlaw/threadify",
+        "docs": "https://github.com/syntaxoutlaw/threadify#readme"
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
 }
