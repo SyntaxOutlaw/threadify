@@ -2,7 +2,7 @@
 
 use Flarum\Extend;
 use Flarum\Post\Event\Saving;
-use Flarum\Post\Event\Saved;
+use Flarum\Post\Event\Posted;
 use Flarum\Api\Serializer\PostSerializer;
 use SyntaxOutlaw\Threadify\Listener\SavePostParentId;
 use SyntaxOutlaw\Threadify\Listener\SavePostToThreadifyTable;
@@ -26,7 +26,7 @@ return [
     // Event listeners
     (new Extend\Event())
         ->listen(Saving::class, SavePostParentId::class)
-        ->listen(Saved::class, SavePostToThreadifyTable::class),
+        ->listen(Posted::class, SavePostToThreadifyTable::class),
     
     // API serialization  
     (new Extend\ApiSerializer(PostSerializer::class))

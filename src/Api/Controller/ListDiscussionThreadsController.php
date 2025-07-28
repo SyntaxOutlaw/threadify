@@ -30,7 +30,14 @@ class ListDiscussionThreadsController extends AbstractListController
     protected function data(ServerRequestInterface $request, Document $document)
     {
         $actor = RequestUtil::getActor($request);
-        $discussionId = intval(Arr::get($request->getQueryParams(), 'id'));
+        
+        // Get discussion ID from route parameters
+        $routeParams = $request->getAttribute('routeParameters', []);
+        $discussionId = intval($routeParams['id'] ?? 0);
+        
+        if (!$discussionId) {
+            throw new \InvalidArgumentException('Discussion ID is required');
+        }
         
         // Find the discussion and check view permissions
         $discussion = Discussion::findOrFail($discussionId);
