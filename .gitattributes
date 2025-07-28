@@ -1,0 +1,5 @@
+**/.gitattributes export-ignore
+**/.gitignore export-ignore
+**/js/dist/forum.js
+**/js/dist/admin.js
+**/js/dist/*.map 
