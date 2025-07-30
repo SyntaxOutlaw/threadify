@@ -2,7 +2,7 @@
     "name": "syntaxoutlaw/threadify",
     "description": "A Flarum extension that adds threaded discussions with visual indentation to your forum, making complex conversations easier to follow.",
     "type": "flarum-extension",
-    "version": "1.0.5",
+    "version": "1.0.6",
     "license": "MIT",
     "keywords": [
         "flarum",
