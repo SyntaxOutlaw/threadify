@@ -29,8 +29,7 @@ class ListDiscussionThreadsController extends AbstractListController
      */
     protected function data(ServerRequestInterface $request, Document $document)
     {
-        $actor = RequestUtil::getActor($request);
-        
+
         // Get discussion ID from route parameters
         $routeParams = $request->getAttribute('routeParameters', []);
         $discussionId = intval($routeParams['id'] ?? 0);
@@ -39,22 +38,9 @@ class ListDiscussionThreadsController extends AbstractListController
             throw new \InvalidArgumentException('Discussion ID is required');
         }
         
-        // Find the discussion and check view permissions
         $discussion = Discussion::findOrFail($discussionId);
-        
-        // Check if the actor can view this discussion
-        if (!$actor->can('view', $discussion)) {
-            throw new PermissionDeniedException();
-        }
-        
-        // Get all threads for this discussion in proper order
         $threads = ThreadifyThread::getDiscussionThreads($discussionId);
         
-        // Filter out posts the user can't see
-        $visibleThreads = $threads->filter(function ($thread) use ($actor) {
-            return $thread->post && $actor->can('view', $thread->post);
-        });
-        
-        return $visibleThreads;
+        return $threads;
     }
 } 
