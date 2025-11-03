@@ -1,10 +1,57 @@
-// Threadify Extension - Forum Styles
-// Minimal: only indentation & guides; no compact spacing to avoid footer misalignment
+// Threadify - Minimal (border-only guides)
+// 不创建定位上下文；导轨=边框，短连线=背景图
 
-// Indentation & colors
-@thread-indent-size: 20px;       // per-depth indent
-@thread-max-depth: 10;           // (note) not programmatically used here
-@thread-border-color: #e0e6ed;   // neutral guide color
+@thread-indent-size: 30px;       // 每层缩进
+@thread-max-depth: 10;           // 说明性变量
+@thread-border-color: #e0e6ed;   // 中性导轨颜色
 
+/* 只有回复（有层级）才会有 .threaded-post 类 */
+.threaded-post {
+  /* 垂直导轨 */
+  border-left: 2px solid @thread-border-color;
 
+  /* 短水平连线（8×1px） */
+  background-image: linear-gradient(@thread-border-color, @thread-border-color);
+  background-repeat: no-repeat;
+  background-size: 8px 1px;
+  background-position: 2px 15px; // x 偏移 2px，y 对齐 15px
+}
 
+/* 层级缩进（不改内部布局） */
+.thread-depth-1  { margin-left: (@thread-indent-size * 1);  }
+.thread-depth-2  { margin-left: (@thread-indent-size * 2);  }
+.thread-depth-3  { margin-left: (@thread-indent-size * 3);  }
+.thread-depth-4  { margin-left: (@thread-indent-size * 4);  }
+.thread-depth-5  { margin-left: (@thread-indent-size * 5);  }
+.thread-depth-6  { margin-left: (@thread-indent-size * 6);  }
+.thread-depth-7  { margin-left: (@thread-indent-size * 7);  }
+.thread-depth-8  { margin-left: (@thread-indent-size * 8);  }
+.thread-depth-9  { margin-left: (@thread-indent-size * 9);  }
+.thread-depth-10 { margin-left: (@thread-indent-size * 10); }
+
+/* Hover 可选强调（仅加粗边框；不触发布局抖动） */
+.threaded-post:hover { border-left-width: 4px; }
+
+/* 轻量“↳”提示，不影响底部 */
+.threaded-post .PostMeta::before {
+  content: '↳ ';
+  color: @thread-border-color;
+  font-weight: normal;
+  margin-right: 3px;
+}
+
+/* 移动端仅减小缩进 */
+@media (max-width: 768px) {
+  .thread-depth-1,
+  .thread-depth-2,
+  .thread-depth-3,
+  .thread-depth-4,
+  .thread-depth-5,
+  .thread-depth-6,
+  .thread-depth-7,
+  .thread-depth-8,
+  .thread-depth-9,
+  .thread-depth-10 {
+    margin-left: 8px !important;
+  }
+}
