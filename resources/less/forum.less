@@ -1,17 +1,16 @@
 // Threadify Extension - Forum Styles
-// Provides visual threading with indentation for nested replies
+// Minimal: only indentation & guides; no compact spacing to avoid footer misalignment
 
-// Thread indentation settings
-@thread-indent-size: 20px;      // How much to indent each level
-@thread-max-depth: 10;          // Maximum thread depth to style (note: not programmatically used here)
-@thread-border-color: #e0e6ed;  // Neutral color for thread connection lines (no per-depth colors)
-// @thread-bg-subtle 已移除：不再为回复卡片添加额外底色
+// Indentation & colors
+@thread-indent-size: 20px;       // per-depth indent
+@thread-max-depth: 10;           // (note) not programmatically used here
+@thread-border-color: #e0e6ed;   // neutral guide color
 
-// Base styling for all threaded posts
+// Base: make container relative so guides can be absolutely positioned
 .threaded-post {
   position: relative;
 
-  // Add a subtle left border to indicate this is a threaded reply (neutral color)
+  // Left vertical guide (neutral, 2px)
   &::before {
     content: '';
     position: absolute;
@@ -19,152 +18,52 @@
     top: 0;
     bottom: 0;
     width: 2px;
-    background-color: @thread-border-color;  // unified, no per-depth colors
+    background-color: @thread-border-color;
+    pointer-events: none; // never block clicks
   }
 
-  // Reduced padding and margins for more compact threaded posts
-  .Post-body {
-    // background-color 已移除：使用主题默认背景
-    border-radius: 4px;
-    padding: 6px;                 // Reduced vertical padding, keep horizontal
-    margin-bottom: 6px;           // Reduced vertical spacing between posts
-  }
-
-  // Compact post header/meta spacing
-  .Post-header {
-    margin-bottom: 6px;           // Reduced spacing after header
-
-    .PostMeta {
-      margin-top: 2px;            // Less space above meta
-    }
-  }
-
-  // Tighter content spacing
-  .Post-content {
-    line-height: 1.4;             // Slightly tighter line spacing
-
-    p {
-      margin-bottom: 6px;         // Reduced paragraph spacing
-
-      &:last-child {
-        margin-bottom: 0;         // No margin on last paragraph
-      }
-    }
-
-    // Reduce spacing for other content elements
-    ul, ol {
-      margin-bottom: 6px;
-    }
-
-    blockquote {
-      margin: 6px 0;
-    }
-  }
-}
-
-// Simple, clear indentation for each thread depth (neutral guide; no per-depth colors)
-// Keep width 3px for deeper levels to enhance visibility, but color stays neutral
-.thread-depth-1 {
-  margin-left: @thread-indent-size;
-
-  &::before {
-    width: 3px; // thicker than base, neutral color inherited
-  }
-}
-
-.thread-depth-2 {
-  margin-left: (@thread-indent-size * 2);
-
-  &::before { width: 3px; }
-}
-
-.thread-depth-3 {
-  margin-left: (@thread-indent-size * 3);
-
-  &::before { width: 3px; }
-}
-
-.thread-depth-4 {
-  margin-left: (@thread-indent-size * 4);
-
-  &::before { width: 3px; }
-}
-
-.thread-depth-5 {
-  margin-left: (@thread-indent-size * 5);
-
-  &::before { width: 3px; }
-}
-
-.thread-depth-6 {
-  margin-left: (@thread-indent-size * 6);
-
-  &::before { width: 3px; }
-}
-
-.thread-depth-7 {
-  margin-left: (@thread-indent-size * 7);
-
-  &::before { width: 3px; }
-}
-
-.thread-depth-8 {
-  margin-left: (@thread-indent-size * 8);
-
-  &::before { width: 3px; }
-}
-
-.thread-depth-9 {
-  margin-left: (@thread-indent-size * 9);
-
-  &::before { width: 3px; }
-}
-
-.thread-depth-10 {
-  margin-left: (@thread-indent-size * 10);
-
-  &::before { width: 3px; }
-}
-
-// Thread connection lines
-.threaded-post {
+  // Small horizontal connector from guide into the post
   &::after {
     content: '';
     position: absolute;
     left: 2px;
-    top: 15px;      // Adjusted for smaller posts
-    width: 8px;     // Slightly smaller
+    top: 15px;    // visually aligned with default Flarum layout
+    width: 8px;
     height: 1px;
-    background-color: @thread-border-color; // neutral connector
+    background-color: @thread-border-color;
+    pointer-events: none;
   }
 }
 
-// Responsive design - reduce indentation on mobile
+// Depth indentation — keep guides 2px (no per-depth colors, no spacing tweaks)
+.thread-depth-1  { margin-left: (@thread-indent-size * 1);  &::before { width: 2px; } }
+.thread-depth-2  { margin-left: (@thread-indent-size * 2);  &::before { width: 2px; } }
+.thread-depth-3  { margin-left: (@thread-indent-size * 3);  &::before { width: 2px; } }
+.thread-depth-4  { margin-left: (@thread-indent-size * 4);  &::before { width: 2px; } }
+.thread-depth-5  { margin-left: (@thread-indent-size * 5);  &::before { width: 2px; } }
+.thread-depth-6  { margin-left: (@thread-indent-size * 6);  &::before { width: 2px; } }
+.thread-depth-7  { margin-left: (@thread-indent-size * 7);  &::before { width: 2px; } }
+.thread-depth-8  { margin-left: (@thread-indent-size * 8);  &::before { width: 2px; } }
+.thread-depth-9  { margin-left: (@thread-indent-size * 9);  &::before { width: 2px; } }
+.thread-depth-10 { margin-left: (@thread-indent-size * 10); &::before { width: 2px; } }
+
+// Hover: only emphasize the guide if you still want a cue.
+// 若严格保持 2px，可把 4px 改回 2px。
+.threaded-post {
+  transition: all 0.2s ease;
+  &:hover { &::before { width: 4px; } }
+}
+
+// Threading indicator in meta — optional,轻量提示为回复
+.threaded-post .PostMeta::before {
+  content: '↳ ';
+  color: @thread-border-color;
+  font-weight: normal;
+  margin-right: 3px;
+}
+
+// Responsive: only reduce indent; DO NOT touch body/header/content spacing
 @media (max-width: 768px) {
-  .threaded-post {
-    // Even more compact padding on mobile, but keep text/avatar sizes
-    .Post-body {
-      padding: 6px 10px !important;   // Very compact padding
-      margin-bottom: 4px !important;  // Minimal spacing between posts
-      // 背景色在移动端也保持默认（不额外上色）
-    }
-
-    .Post-header {
-      margin-bottom: 4px !important;  // Minimal header spacing
-    }
-
-    .Post-content {
-      p {
-        margin-bottom: 4px !important; // Very tight paragraph spacing
-      }
-
-      ul, ol, blockquote {
-        margin-bottom: 4px !important;
-      }
-    }
-  }
-
-  // Even smaller indent on mobile; guide color stays neutral (no per-depth colors)
   .thread-depth-1,
   .thread-depth-2,
   .thread-depth-3,
@@ -175,10 +74,10 @@
   .thread-depth-8,
   .thread-depth-9,
   .thread-depth-10 {
-    margin-left: 8px !important;
+    margin-left: 8px !important; // smaller indent on mobile
   }
 
-  // Keep guide thickness consistent on mobile; neutral color inherited
+  // Keep guide thickness consistent on mobile
   .thread-depth-1::before,
   .thread-depth-2::before,
   .thread-depth-3::before,
@@ -189,32 +88,8 @@
   .thread-depth-8::before,
   .thread-depth-9::before,
   .thread-depth-10::before {
-    width: 3px !important;        // Slightly thicker than base for visibility
+    width: 2px !important;
   }
 }
 
-// Hover effects
-.threaded-post {
-  transition: all 0.2s ease;
 
-  &:hover {
-    &::before {
-      width: 4px; // emphasize current item; color remains neutral
-    }
-
-    .Post-body {
-      // 取消对卡片背景的加深（原 darken(@thread-bg-subtle, 5%) 已移除）
-      transform: translateX(2px);  // Subtle shift on hover
-    }
-  }
-}
-
-// Threading indicator in post meta - more subtle
-.threaded-post .PostMeta {
-  &::before {
-    content: '↳ ';
-    color: @thread-border-color;   // neutral indicator
-    font-weight: normal;           // Less bold
-    margin-right: 3px;             // Less margin
-  }
-}
