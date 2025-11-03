@@ -2,7 +2,7 @@
 // Provides visual threading with indentation for nested replies
 
 // Thread indentation settings
-@thread-indent-size: 30px;      // How much to indent each level
+@thread-indent-size: 10px;      // How much to indent each level
 @thread-max-depth: 10;          // Maximum thread depth to style (note: not programmatically used here)
 @thread-border-color: #e0e6ed;  // Neutral color for thread connection lines (no per-depth colors)
 // @thread-bg-subtle 已移除：不再为回复卡片添加额外底色
@@ -11,14 +11,14 @@
 .threaded-post {
   position: relative;
 
-  // Add a subtle left border to indicate this is a threaded reply (neutral color)
+  // Left guide line for threaded replies (neutral color, 2px)
   &::before {
     content: '';
     position: absolute;
     left: 0;
     top: 0;
     bottom: 0;
-    width: 2px;
+    width: 2px;                       // baseline guide thickness
     background-color: @thread-border-color;  // unified, no per-depth colors
   }
 
@@ -62,68 +62,65 @@
   }
 }
 
-// Simple, clear indentation for each thread depth (neutral guide; no per-depth colors)
-// Keep width 3px for deeper levels to enhance visibility, but color stays neutral
+// Simple, clear indentation for each thread depth (neutral guide; width = 2px)
 .thread-depth-1 {
   margin-left: @thread-indent-size;
 
-  &::before {
-    width: 3px; // thicker than base, neutral color inherited
-  }
+  &::before { width: 2px; } // neutral thickness
 }
 
 .thread-depth-2 {
   margin-left: (@thread-indent-size * 2);
 
-  &::before { width: 3px; }
+  &::before { width: 2px; }
 }
 
 .thread-depth-3 {
   margin-left: (@thread-indent-size * 3);
 
-  &::before { width: 3px; }
+  &::before { width: 2px; }
 }
 
 .thread-depth-4 {
   margin-left: (@thread-indent-size * 4);
 
-  &::before { width: 3px; }
+  &::before { width: 2px; }
 }
 
 .thread-depth-5 {
   margin-left: (@thread-indent-size * 5);
 
-  &::before { width: 3px; }
+  &::before { width: 2px; }
 }
 
 .thread-depth-6 {
   margin-left: (@thread-indent-size * 6);
 
-  &::before { width: 3px; }
+  &::before { width: 2px; }
 }
 
 .thread-depth-7 {
   margin-left: (@thread-indent-size * 7);
 
-  &::before { width: 3px; }
+  &::before { width: 2px; }
 }
 
 .thread-depth-8 {
   margin-left: (@thread-indent-size * 8);
 
-  &::before { width: 3px; }
+  &::before { width: 2px; }
 }
 
 .thread-depth-9 {
   margin-left: (@thread-indent-size * 9);
 
-  &::before { width: 3px; }
+  &::before { width: 2px; }
 }
 
 .thread-depth-10 {
   margin-left: (@thread-indent-size * 10);
 
-  &::before { width: 3px; }
+  &::before { width: 2px; }
 }
 
 // Thread connection lines
@@ -178,7 +175,7 @@
     margin-left: 8px !important;
   }
 
-  // Keep guide thickness consistent on mobile; neutral color inherited
+  // Keep guide thickness consistent on mobile; force width = 2px
   .thread-depth-1::before,
   .thread-depth-2::before,
   .thread-depth-3::before,
@@ -189,7 +186,7 @@
   .thread-depth-8::before,
   .thread-depth-9::before,
   .thread-depth-10::before {
-    width: 3px !important;        // Slightly thicker than base for visibility
+    width: 2px !important;        // baseline thickness on mobile
   }
 }
 
@@ -199,7 +196,7 @@
 
   &:hover {
     &::before {
-      width: 4px; // emphasize current item; color remains neutral
+      width: 4px; // emphasize current item on hover (bump from 2px). If you want strict 2px, change to 2px.
     }
 
     .Post-body {
@@ -218,3 +215,17 @@
     margin-right: 3px;             // Less margin
   }
 }
+
+// Debug styles to help see what's happening
+// (Disabled in no-color/no-bg build; keep here for future debugging)
+// .thread-depth-1 { border-top: 2px solid red; }
+// .thread-depth-2 { border-top: 2px solid blue; }
+// .thread-depth-3 { border-top: 2px solid green; }
+// .thread-depth-4 { border-top: 2px solid orange; }
+// .thread-depth-5 { border-top: 2px solid purple; }
+// .thread-depth-6 { border-top: 2px solid teal; }
+// .thread-depth-7 { border-top: 2px solid navy; }
+// .thread-depth-8 { border-top: 2px solid brown; }
+// .thread-depth-9 { border-top: 2px solid black; }
+// .thread-depth-10 { border-top: 2px solid indigo; }
+
