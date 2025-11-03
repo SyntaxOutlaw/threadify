@@ -1,25 +1,20 @@
-// Threadify Extension - Main Entry Point (fixed)
-import { initThreadedPostStream } from './components/ThreadedPostStream';
+import app from 'flarum/forum/app';
+import DiscussionPage from 'flarum/forum/components/DiscussionPage';
+import { extend } from 'flarum/common/extend';
+
 import { initThreadedPost } from './components/ThreadedPost';
 import { initThreadedReplyComposer } from './components/ThreadedReplyComposer';
+import { initThreadedPostStream } from './components/ThreadedPostStream'; // 用你当前的（无首帧阻断）版本
+import { prefetchThreadOrder } from './utils/ThreadOrderPrefetch';
 
 app.initializers.add('syntaxoutlaw-threadify', () => {
-  try {
-    // 使用稳定版（基于 PostStreamState 的可见页包裹），不要启用简化版 API 流程
-    initThreadedPostStream();
-    initThreadedPost();
-    initThreadedReplyComposer();
+  initThreadedPost();
+  initThreadedReplyComposer();
+  initThreadedPostStream();
 
-    console.log('[Threadify] stable PostStreamState wrapper loaded');
-
-    // 便捷调试
-    window.threadifyDebug = {
-      forceRebuild: (ps) => {
-        const { forceRebuildCache } = require('./components/ThreadedPostStream');
-        forceRebuildCache(ps);
-      }
-    };
-  } catch (e) {
-    console.error('[Threadify] init failed:', e);
-  }
+  // 讨论页 oninit 立刻预取顺序（payload 极小，通常 < 10ms）
+  extend(DiscussionPage.prototype, 'oninit', function() {
+    const did = this.discussion && this.discussion.id && this.discussion.id();
+    if (did) prefetchThreadOrder(did);
+  });
 });
