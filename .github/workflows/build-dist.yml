@@ -1,0 +1,118 @@
+name: build-dist
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    if: github.event_name == 'workflow_dispatch' || github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Use Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # 可选：加个 npm 缓存，加速
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-${{ hashFiles('js/package-lock.json') }}
+          restore-keys: ${{ runner.os }}-node-
+
+      - name: Show versions
+        working-directory: js
+        run: |
+          node -v
+          npm -v
+
+      - name: Detect entrypoints (forum required, admin optional)
+        id: detect
+        working-directory: js
+        run: |
+          # forum: allow .js or .ts
+          if [ -f forum.js ] || [ -f forum.ts ]; then
+            echo "HAS_FORUM=true" >> $GITHUB_ENV
+            if [ -f forum.js ]; then
+              echo "FORUM_ENTRY=forum.js" >> $GITHUB_ENV
+            else
+              echo "FORUM_ENTRY=forum.ts" >> $GITHUB_ENV
+            fi
+          else
+            echo "::error::Missing js/forum.{js,ts} entry. Create one that re-exports from ./src/forum (see Flarum docs)."
+            exit 1
+          fi
+
+          # admin: optional (.js or .ts)
+          if [ -f admin.js ] || [ -f admin.ts ]; then
+            echo "HAS_ADMIN=true" >> $GITHUB_ENV
+          else
+            echo "HAS_ADMIN=false" >> $GITHUB_ENV
+            echo "::notice::js/admin.{js,ts} not found; admin bundle will be skipped."
+          fi
+
+          # Heads-up for JSX in TS
+          if [ -f forum.ts ] && grep -q "<" forum.ts 2>/dev/null; then
+            echo "::warning::js/forum.ts may contain JSX; prefer .tsx to avoid tooling quirks."
+          fi
+
+      - name: Install deps
+        working-directory: js
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm i
+          fi
+
+      - name: Build (flarum-webpack-config)
+        working-directory: js
+        env:
+          CI: true
+        run: |
+          npx webpack --mode production
+          echo "== After build, list dist =="
+          ls -lah dist || true
+
+      - name: Assert dist produced
+        run: |
+          echo "== List js/dist =="
+          ls -lah js/dist || true
+
+          test -f js/dist/forum.js || { echo "::error::js/dist/forum.js not found after build"; exit 1; }
+
+          if [ "${{ env.HAS_ADMIN }}" = "true" ]; then
+            test -f js/dist/admin.js || { echo "::error::js/dist/admin.js not found after build (admin entry exists)"; exit 1; }
+          else
+            echo "::notice::Skipping admin dist assertion."
+          fi
+
+      - name: Commit dist (force add even if ignored)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f js/dist
+          if ! git diff --cached --quiet; then
+            git commit -m "build: update dist [skip ci]"
+            git push
+          else
+            echo "No changes to commit."
+          fi
+
+      - name: Upload dist as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: js-dist
+          path: js/dist
