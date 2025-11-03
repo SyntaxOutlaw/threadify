@@ -1,23 +1,7 @@
-// Threadify - Minimal (border-only guides)
-// 不创建定位上下文；导轨=边框，短连线=背景图
+// Threadify — Inset Accent Bar (no lines or ticks)
+@thread-indent-size: 30px;
+@thread-border-color: #e0e6ed;
 
-@thread-indent-size: 30px;       // 每层缩进
-@thread-max-depth: 10;           // 说明性变量
-@thread-border-color: #e0e6ed;   // 中性导轨颜色
-
-/* 只有回复（有层级）才会有 .threaded-post 类 */
-.threaded-post {
-  /* 垂直导轨 */
-  border-left: 2px solid @thread-border-color;
-
-  /* 短水平连线（8×1px） */
-  background-image: linear-gradient(@thread-border-color, @thread-border-color);
-  background-repeat: no-repeat;
-  background-size: 8px 1px;
-  background-position: 2px 15px; // x 偏移 2px，y 对齐 15px
-}
-
-/* 层级缩进（不改内部布局） */
 .thread-depth-1  { margin-left: (@thread-indent-size * 1);  }
 .thread-depth-2  { margin-left: (@thread-indent-size * 2);  }
 .thread-depth-3  { margin-left: (@thread-indent-size * 3);  }
@@ -29,18 +13,21 @@
 .thread-depth-9  { margin-left: (@thread-indent-size * 9);  }
 .thread-depth-10 { margin-left: (@thread-indent-size * 10); }
 
-/* Hover 可选强调（仅加粗边框；不触发布局抖动） */
-.threaded-post:hover { border-left-width: 4px; }
-
-/* 轻量“↳”提示，不影响底部 */
-.threaded-post .PostMeta::before {
-  content: '↳ ';
-  color: @thread-border-color;
-  font-weight: normal;
-  margin-right: 3px;
+.threaded-post .Post-body,
+.Post--threaded .Post-body {
+  /* 内凹 2px 细条，不改变布局 */
+  box-shadow: inset 2px 0 0 @thread-border-color;
+  transition: box-shadow .2s ease;
+  /* 给细条留一点视觉空间（可按主题微调/删除） */
+  padding-left: 10px;
 }
 
-/* 移动端仅减小缩进 */
+.threaded-post:hover .Post-body,
+.Post--threaded:hover .Post-body {
+  /* 悬停时略微强调（想保持固定 2px 就删掉这一条） */
+  box-shadow: inset 4px 0 0 @thread-border-color;
+}
+
 @media (max-width: 768px) {
   .thread-depth-1,
   .thread-depth-2,
@@ -51,7 +38,14 @@
   .thread-depth-7,
   .thread-depth-8,
   .thread-depth-9,
-  .thread-depth-10 {
-    margin-left: 8px !important;
-  }
+  .thread-depth-10 { margin-left: 8px !important; }
 }
+
+/* 轻量“↳”提示（可删） */
+.threaded-post .PostMeta::before,
+.Post--threaded .PostMeta::before {
+  content: '↳ ';
+  color: @thread-border-color;
+  margin-right: 3px;
+}
+
