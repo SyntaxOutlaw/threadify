@@ -1,255 +1,132 @@
 /**
- * Post Loader Utilities
- * 
- * Handles loading missing posts that are needed for complete thread rendering.
- * This includes both parent posts (referenced by loaded posts) and child posts
- * (that reference loaded posts as parents).
- * 
- * Uses surgical API calls to minimize data transfer and maintains proper
- * error handling for robust operation.
- * 
- * @author Threadify Extension
+ * Post Loader Utilities (fixed for Flarum 1.8)
+ *
+ * 修复点：
+ * 1) 统一使用字符串比较 ID，避免 number/string 混用造成的漏判。
+ * 2) 兼容 postStream.discussion 与 postStream.stream.discussion。
+ * 3) 提供 mergeUniquePostsById 以防重复注入同一帖子。
  */
 
+import app from 'flarum/forum/app';
+
+/** -------------------- Helpers -------------------- **/
+
+function toStrId(x) {
+  return x == null ? '' : String(x);
+}
+
+function getDiscussionFrom(postStream) {
+  // 兼容两种拿法
+  return postStream?.discussion || postStream?.stream?.discussion || null;
+}
+
+function mergeUniquePostsById(basePosts, extraPosts) {
+  const map = new Map();
+  basePosts.filter(Boolean).forEach((p) => map.set(toStrId(p.id()), p));
+  extraPosts.filter(Boolean).forEach((p) => map.set(toStrId(p.id()), p));
+  return Array.from(map.values());
+}
+
+function loadPostsByIds(postIds) {
+  const ids = (postIds || []).map(toStrId).filter(Boolean);
+  if (ids.length === 0) return Promise.resolve([]);
+
+  return app.store.find('posts', {
+    filter: { id: ids.join(',') },
+    // page: { limit: ids.length } // 可选：限制体积
+  });
+}
+
+/** -------------------- Public APIs -------------------- **/
+
 /**
- * Load missing parent posts that are referenced but not currently loaded
- * 
- * Scans currently loaded posts for parent_id references and loads any
- * referenced posts that aren't already loaded. This ensures complete
- * thread chains are available for proper threading display.
- * 
- * @param {PostStream} postStream - The PostStream instance
- * @param {Post[]} currentPosts - Currently loaded posts
- * @returns {Promise<Post[]>} - Promise resolving to all posts (current + loaded parents)
+ * 递归补齐“缺失父帖”
+ * - 扫描 currentPosts，找出其 parent_id 未在集合中的父帖，批量拉取；
+ * - 合并后若仍有更上层父帖缺失，则继续递归，直到根或已齐全。
  */
 export function loadMissingParentPosts(postStream, currentPosts) {
-  const currentPostIds = new Set(currentPosts.map(p => p.id()));
+  const posts = (currentPosts || []).filter(Boolean);
+  const currentIdSet = new Set(posts.map((p) => toStrId(p.id())));
   const missingParentIds = [];
-  
-  // Scan all visible posts for parent_id references
-  currentPosts.forEach(post => {
-    const parentId = post.attribute('parent_id');
-    if (parentId && !currentPostIds.has(String(parentId))) {
-      // This post references a parent that isn't currently loaded
-      missingParentIds.push(String(parentId));
-    }
+
+  posts.forEach((p) => {
+    const pid = toStrId(p?.attribute?.('parent_id'));
+    if (pid && !currentIdSet.has(pid)) missingParentIds.push(pid);
   });
-  
-  // Remove duplicates
-  const uniqueMissingIds = Array.from(new Set(missingParentIds));
-  
-  if (uniqueMissingIds.length === 0) {
-    // No missing parents, return current posts
-    return Promise.resolve(currentPosts);
+
+  const uniqueMissing = Array.from(new Set(missingParentIds));
+  if (uniqueMissing.length === 0) {
+    return Promise.resolve(posts);
   }
-  
-  console.log(`[Threadify] Loading ${uniqueMissingIds.length} missing parent posts`);
-  
-  // Load missing parent posts via API
-  return loadPostsByIds(uniqueMissingIds)
-    .then(loadedParents => {
-      
-      // Combine current posts with loaded parents
-      const allPosts = [...currentPosts, ...loadedParents];
-      
-      // Recursively check if the newly loaded parents also have missing parents
-      // This handles deep threading chains where parents also have parents
-      return loadMissingParentPosts(postStream, allPosts);
+
+  return loadPostsByIds(uniqueMissing)
+    .then((loadedParents) => {
+      const merged = mergeUniquePostsById(posts, loadedParents);
+      // 递归，直到没有缺父帖
+      return loadMissingParentPosts(postStream, merged);
     })
-    .catch(error => {
-      console.warn('[Threadify] Failed to load parent posts:', error);
-      return currentPosts; // Return current posts if loading fails
+    .catch((err) => {
+      console.warn('[Threadify] Failed to load parent posts:', err);
+      // 出错时保守返回已有帖子，避免卡住
+      return posts;
     });
 }
 
 /**
- * Load missing child posts that reference currently visible posts as parents
- * 
- * Loads posts from the discussion that aren't currently visible but reference
- * visible posts as their parents. This ensures child replies are shown even
- * if they weren't initially loaded in the current view.
- * 
- * @param {PostStream} postStream - The PostStream instance  
- * @param {Post[]} currentPosts - Currently loaded posts (including any loaded parents)
- * @returns {Promise<Post[]>} - Promise resolving to all posts (current + loaded children)
- */
-export function loadMissingChildren(postStream, currentPosts) {
-  const currentPostIds = currentPosts.map(p => p.id());
-  
-  if (currentPostIds.length === 0) {
-    return Promise.resolve(currentPosts);
-  }
-  
-  // Get all post IDs in the discussion
-  const discussionPostIds = postStream.discussion.postIds();
-  const loadedPostIdSet = new Set(currentPostIds.map(id => String(id)));
-  
-  // Find unloaded posts that might be children
-  const unloadedPostIds = discussionPostIds.filter(id => !loadedPostIdSet.has(String(id)));
-  
-  if (unloadedPostIds.length === 0) {
-    return Promise.resolve(currentPosts);
-  }
-  
-  // Be more conservative - only load a small sample of recent posts
-  // This reduces the "janky reloading" by not loading too many posts at once
-  const sampleSize = Math.min(10, unloadedPostIds.length); // Reduced from 30 to 10
-  const recentUnloaded = unloadedPostIds.slice(-sampleSize); // Get most recent posts
-  
-  console.log(`[Threadify] Checking ${sampleSize} recent unloaded posts for children`);
-  
-  // Load sample posts to check if any are children of visible posts
-  return loadPostsByIds(recentUnloaded)
-    .then(loadedSamplePosts => {
-      // Filter for posts that are actually children of currently visible posts
-      const actualChildren = loadedSamplePosts.filter(post => {
-        const parentId = post.attribute('parent_id');
-        return parentId && currentPostIds.includes(String(parentId));
-      });
-      
-      console.log(`[Threadify] Found ${actualChildren.length} actual children from sample`);
-      
-      if (actualChildren.length > 0) {
-        // Add the children to our current posts
-        const allPostsWithChildren = [...currentPosts, ...actualChildren];
-        
-        // Don't recursively check for more children to avoid excessive loading
-        // This prevents the cascade of API calls that causes "janky reloading"
-        return allPostsWithChildren;
-      } else {
-        return currentPosts;
-      }
-    })
-    .catch(error => {
-      console.warn('[Threadify] Failed to load child posts:', error);
-      return currentPosts;
-    });
-}
-
-/**
- * Load complete thread context for given posts
- * 
- * Convenience function that loads both missing parents and children
- * for a complete threading context.
- * 
- * @param {PostStream} postStream - The PostStream instance
- * @param {Post[]} posts - Initial posts to build context around
- * @returns {Promise<Post[]>} - Promise resolving to posts with complete thread context
- */
-export function loadCompleteThreadContext(postStream, posts) {
-  return loadMissingParentPosts(postStream, posts)
-    .then(postsWithParents => loadMissingChildren(postStream, postsWithParents))
-    .then(allPosts => {
-      return allPosts;
-    })
-    .catch(error => {
-      console.warn('[Threadify] Failed to load thread context:', error);
-      return posts; // Fallback to original posts
-    });
-}
-
-/**
- * Load only missing child posts (conservative approach)
- * 
- * Much more conservative than loadCompleteThreadContext - only loads
- * a small number of recent children, no parents, no recursion.
- * 
- * @param {PostStream} postStream - The PostStream instance
- * @param {Post[]} currentPosts - Currently loaded posts
- * @returns {Promise<Post[]>} - Promise resolving to posts with minimal children added
+ * 仅“保守”补少量子帖
+ * - 按讨论里尚未加载的 postId 取一个小样本（默认 5~10）；
+ * - 只把其 parent_id 指向“当前已加载集合”的帖子作为“实际子帖”纳入；
+ * - 不递归，避免二次抖动。
  */
 export function loadMinimalChildren(postStream, currentPosts) {
-  const currentPostIds = currentPosts.map(p => p.id());
-  
-  if (currentPostIds.length === 0) {
-    return Promise.resolve(currentPosts);
+  const discussion = getDiscussionFrom(postStream);
+  const posts = (currentPosts || []).filter(Boolean);
+  const currentIdSet = new Set(posts.map((p) => toStrId(p.id())));
+
+  if (!discussion || typeof discussion.postIds !== 'function') {
+    return Promise.resolve(posts);
   }
-  
-  // Get all post IDs in the discussion
-  const discussionPostIds = postStream.discussion.postIds();
-  const loadedPostIdSet = new Set(currentPostIds.map(id => String(id)));
-  
-  // Find unloaded posts that might be children
-  const unloadedPostIds = discussionPostIds.filter(id => !loadedPostIdSet.has(String(id)));
-  
-  if (unloadedPostIds.length === 0) {
-    return Promise.resolve(currentPosts);
+
+  const discussionPostIds = (discussion.postIds() || []).map(toStrId);
+  const unloadedIds = discussionPostIds.filter((id) => id && !currentIdSet.has(id));
+
+  if (unloadedIds.length === 0) {
+    return Promise.resolve(posts);
   }
-  
-  // Be very conservative - only load a tiny sample of the most recent posts
-  const sampleSize = Math.min(5, unloadedPostIds.length); // Very small sample
-  const recentUnloaded = unloadedPostIds.slice(-sampleSize);
-  
-  console.log(`[Threadify] Checking only ${sampleSize} recent posts for children`);
-  
-  // Load sample posts to check if any are children of visible posts
+
+  const sampleSize = Math.min(10, unloadedIds.length); // 轻量探测
+  const recentUnloaded = unloadedIds.slice(-sampleSize);
+
   return loadPostsByIds(recentUnloaded)
-    .then(loadedSamplePosts => {
-      // Filter for posts that are actually children of currently visible posts
-      const actualChildren = loadedSamplePosts.filter(post => {
-        const parentId = post.attribute('parent_id');
-        return parentId && currentPostIds.includes(String(parentId));
+    .then((loadedSample) => {
+      // 只收“父在集合里”的实际子帖
+      const actualChildren = (loadedSample || []).filter((p) => {
+        const pid = toStrId(p?.attribute?.('parent_id'));
+        return pid && currentIdSet.has(pid);
       });
-      
-      console.log(`[Threadify] Found ${actualChildren.length} children from minimal sample`);
-      
-      if (actualChildren.length > 0) {
-        // Add the children to our current posts (no recursion)
-        return [...currentPosts, ...actualChildren];
-      } else {
-        return currentPosts;
+
+      if (actualChildren.length === 0) {
+        return posts;
       }
+      return mergeUniquePostsById(posts, actualChildren);
     })
-    .catch(error => {
-      console.warn('[Threadify] Minimal child loading failed:', error);
-      return currentPosts;
+    .catch((err) => {
+      console.warn('[Threadify] Failed to load child posts:', err);
+      return posts;
     });
 }
 
 /**
- * Load posts by their IDs using Flarum's API
- * 
- * Makes a surgical API call to load specific posts by ID.
- * Handles the Flarum API format and error cases gracefully.
- * 
- * @param {string[]} postIds - Array of post IDs to load
- * @returns {Promise<Post[]>} - Promise resolving to loaded posts
- */
-function loadPostsByIds(postIds) {
-  if (!postIds || postIds.length === 0) {
-    return Promise.resolve([]);
-  }
-  
-  // Create the ID string for the API call
-  const idString = postIds.join(',');
-  
-  // Use Flarum's store to load posts with filter parameter
-  return app.store.find('posts', {
-    filter: { id: idString }
-  });
-}
-
-/**
- * Check if posts need thread context loading
- * 
- * Determines if the given posts would benefit from loading additional
- * thread context (missing parents or children).
- * 
- * @param {Post[]} posts - Posts to check
- * @returns {boolean} - True if context loading would be beneficial
+ * 检测是否“有理由补上下文”
+ * - 目前仅检测是否存在缺失父帖；如需可扩展。
  */
 export function needsThreadContext(posts) {
-  if (!posts || posts.length === 0) {
-    return false;
-  }
-  
-  const postIds = new Set(posts.map(p => p.id()));
-  
-  // Check if any posts reference parents that aren't loaded
-  const hasMissingParents = posts.some(post => {
-    const parentId = post.attribute('parent_id');
-    return parentId && !postIds.has(String(parentId));
+  const arr = (posts || []).filter(Boolean);
+  if (arr.length === 0) return false;
+
+  const idSet = new Set(arr.map((p) => toStrId(p.id())));
+  return arr.some((p) => {
+    const pid = toStrId(p?.attribute?.('parent_id'));
+    return pid && !idSet.has(pid);
   });
-  
-  return hasMissingParents;
-} 
+}
