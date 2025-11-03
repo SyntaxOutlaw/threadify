@@ -1,342 +1,281 @@
 /**
- * Threaded PostStream Component Extensions
- * 
- * Handles PostStream component extensions for threading functionality.
- * This is the core module that manages:
- * - Overriding PostStream's posts() method to return threaded posts
- * - Caching threaded post arrangements for performance
- * - Detecting when posts change and rebuilding thread cache
- * - Integrating with PostLoader for complete thread context
- * - Managing the complex lifecycle of post stream updates
- * 
- * @author Threadify Extension
+ * Threaded PostStream Component Extensions (FIXED)
+ *
+ * 要点：
+ * 1) 始终在建树前补齐缺失父帖（必要时再保守补少量子帖），保证 3545→3534 这类关系可被前端正确归组。
+ * 2) 双保险接管顺序：
+ *    - 覆写 this.stream.posts() 返回线程化数组（与旧管线一致）
+ *    - 再在 PostStreamState.visiblePosts 上按线程顺序稳定排序（防止其他扩展覆盖视图逻辑）
  */
 
+import app from 'flarum/forum/app';
 import { extend } from 'flarum/common/extend';
 import PostStream from 'flarum/forum/components/PostStream';
+import PostStreamState from 'flarum/forum/states/PostStreamState';
+
 import { createThreadedPosts } from '../utils/ThreadTree';
 import { clearThreadDepthCache } from '../utils/ThreadDepth';
-import { loadMinimalChildren } from '../utils/PostLoader';
+import { loadMissingParentPosts, loadMinimalChildren } from '../utils/PostLoader';
 
-// Global state for the PostStream threading system
-let isReordering = false; // Prevent infinite loops during reordering
-let reorderedPostsCache = null; // Cache for threaded posts arrangement
-let lastPostCount = 0; // Track post count to detect actual changes
-let originalPostsMethod = null;
+// -------- 全局状态（本组件生命周期内共享） --------
+let isReordering = false;                 // 防止重入
+let reorderedPostsCache = null;           // 线程化后的数组（含 null 占位以维持分页长度）
+let lastPostCount = 0;                    // 上次可见帖子数量
+let originalPostsMethod = null;           // 保存原始 this.stream.posts
+let currentDiscussionId = null;           // 当前讨论 ID
+let threadedOrder = null;                 // Map<postId, orderIndex>，用于状态层排序兜底
+let enableMinimalChildLoading = true;     // 默认开启“保守子帖补全”
 
-// Configuration flag for optional minimal child loading
-let enableMinimalChildLoading = false;
-
-/**
- * Initialize PostStream component extensions for threading
- * 
- * Sets up all the necessary hooks and overrides to make PostStream
- * display posts in threaded order while maintaining compatibility
- * with Flarum's existing post loading and updating mechanisms.
- */
+// ----------------- 入口：注册所有钩子 -----------------
 export function initThreadedPostStream() {
-  // Override posts method immediately when PostStream initializes (before any rendering)
-  extend(PostStream.prototype, 'oninit', function() {
-    
-    // Store reference to original posts method
-    originalPostsMethod = this.stream.posts;
-    
-    // Override posts() method immediately, before any rendering
+  // 组件层：初始化时覆写 this.stream.posts，并触发首轮重建
+  extend(PostStream.prototype, 'oninit', function () {
+    const did = this.stream.discussion.id();
+    if (currentDiscussionId !== did) {
+      resetState(did);
+    }
+
+    // 保存原始 posts() 并覆写为我们的代理
+    if (!originalPostsMethod) originalPostsMethod = this.stream.posts;
+
     this.stream.posts = () => {
-      // If we have threaded cache, return it
       if (reorderedPostsCache) {
-        console.log(`[Threadify] Returning threaded posts (${reorderedPostsCache.filter(p => p).length} posts)`);
         return reorderedPostsCache;
       }
-      
-      // If no cache, return original posts and trigger rebuild
-      const originalPosts = originalPostsMethod.call(this.stream);
-      console.log(`[Threadify] No cache, returning original posts (${originalPosts ? originalPosts.filter(p => p).length : 0} posts)`);
-      
-      // Trigger cache rebuild if we have posts and not currently building
-      if (originalPosts && originalPosts.filter(p => p).length > 0 && !isReordering) {
-        console.log(`[Threadify] Triggering cache rebuild`);
+      const original = originalPostsMethod.call(this.stream);
+      // 若还没缓存，异步重建一次
+      if (!isReordering && original && original.filter(Boolean).length > 0) {
         updateReorderedCache(this);
       }
-      
-      return originalPosts;
+      return original;
     };
-    
-    // Initialize post count for tracking changes using original method
-    const currentPosts = originalPostsMethod.call(this.stream);
-    lastPostCount = currentPosts ? currentPosts.filter(p => p).length : 0;
-    console.log(`[Threadify] Initial post count: ${lastPostCount}`);
-    
-    // Immediately build threaded cache if we have posts
-    if (currentPosts && currentPosts.length > 0) {
+
+    // 初始化计数并触发首次构建
+    const current = originalPostsMethod.call(this.stream) || [];
+    lastPostCount = current.filter(Boolean).length;
+    if (lastPostCount > 0) updateReorderedCache(this);
+  });
+
+  // 组件层：讨论切换时清理缓存
+  extend(PostStream.prototype, 'oncreate', function () {
+    const did = this.stream.discussion.id();
+    if (currentDiscussionId !== did) {
+      resetState(did);
+      // 新讨论首屏构建
+      const cur = originalPostsMethod ? (originalPostsMethod.call(this.stream) || []) : [];
+      lastPostCount = cur.filter(Boolean).length;
+      if (lastPostCount > 0) updateReorderedCache(this);
+    }
+    clearThreadDepthCache();
+  });
+
+  // 组件层：可见帖子数量变化则重建
+  extend(PostStream.prototype, 'onupdate', function () {
+    if (!originalPostsMethod) return;
+    const current = originalPostsMethod.call(this.stream) || [];
+    const count = current.filter(Boolean).length;
+    if (count !== lastPostCount) {
+      lastPostCount = count;
+      reorderedPostsCache = null;
+      threadedOrder = null;
+      clearThreadDepthCache();
       updateReorderedCache(this);
     }
   });
-  
-  // Hook into PostStream.view() to ensure cache is ready during rendering
-  extend(PostStream.prototype, 'view', function(result) {
-    // Update our reordered cache if needed
-    if (!reorderedPostsCache && originalPostsMethod) {
-      updateReorderedCache(this);
-    }
-    
-    return result;
-  });
-  
-  // Clear caches when component is created (discussion change, etc.)
-  extend(PostStream.prototype, 'oncreate', function() {
-    clearThreadDepthCache();
-    // Note: Don't clear reorderedPostsCache here as it was built in oninit
-  });
-  
-  // Rebuild cache immediately when posts are updated
-  extend(PostStream.prototype, 'onupdate', function() {
-    handlePostStreamUpdate(this);
+
+  // 状态层：真正决定“可见顺序”的地方——按 threadedOrder 稳定排序（兜底）
+  extend(PostStreamState.prototype, 'visiblePosts', function (result) {
+    if (!threadedOrder || !Array.isArray(result) || result.length <= 1) return;
+
+    result.sort((a, b) => {
+      const ai = a && a.id ? threadedOrder.get(a.id()) : undefined;
+      const bi = b && b.id ? threadedOrder.get(b.id()) : undefined;
+      if (ai == null && bi == null) return 0;
+      if (ai == null) return 1;
+      if (bi == null) return -1;
+      return ai - bi;
+    });
   });
 }
 
-/**
- * Handle PostStream updates and rebuild cache when needed
- * 
- * @param {PostStream} postStream - The PostStream instance
- */
-function handlePostStreamUpdate(postStream) {
-  // Don't interfere if we're already reordering
-  if (isReordering) {
-    return;
-  }
-  
-  // Check if post count actually changed using original posts method
-  if (!originalPostsMethod) return; // No original method stored yet
-  
-  const currentPosts = originalPostsMethod.call(postStream.stream);
-  const currentPostCount = currentPosts ? currentPosts.filter(p => p).length : 0;
-  
-  // Only rebuild if post count changed (indicating new/removed posts)
-  if (currentPostCount !== lastPostCount) {
-    console.log(`[Threadify] Post count changed: ${lastPostCount} -> ${currentPostCount}, rebuilding cache`);
-    
-    // Update tracked count
-    lastPostCount = currentPostCount;
-    
-    // Clear old cache completely and rebuild with simple threading
-    reorderedPostsCache = null;
-    clearThreadDepthCache();
-    
-    // Simple immediate rebuild without context loading
-    updateReorderedCache(postStream);
-  }
-}
-
-/**
- * Update the reordered posts cache with simple threaded arrangement
- * 
- * Simplified approach: just do basic threading with current posts,
- * with optional minimal child loading if enabled.
- * 
- * @param {PostStream} postStream - The PostStream instance
- */
+// ----------------- 核心：构建/刷新缓存 -----------------
 function updateReorderedCache(postStream) {
-  if (isReordering) {
-    return;
-  }
-  
+  if (isReordering) return;
   isReordering = true;
-  
+
   try {
-    // Get the ORIGINAL posts from the stream using the stored original method
     if (!originalPostsMethod) {
-      reorderedPostsCache = null;
+      finishWith(null);
       return;
     }
-    
-    const originalPosts = originalPostsMethod.call(postStream.stream);
-    
-    if (!originalPosts || originalPosts.length === 0) {
-      reorderedPostsCache = null;
-      return;
-    }
-    
-    // Filter out null/undefined posts
-    const validPosts = originalPosts.filter(post => post);
-    
+
+    const originalPosts = originalPostsMethod.call(postStream.stream) || [];
+    const validPosts = originalPosts.filter(Boolean);
     if (validPosts.length === 0) {
-      reorderedPostsCache = null;
+      finishWith(null);
       return;
     }
-    
-    // Check if minimal child loading is enabled
-    if (enableMinimalChildLoading) {
-      // Load minimal children and then apply threading
-      loadMinimalChildren(postStream, validPosts)
-        .then((postsWithChildren) => {
-          if (!isReordering) return; // Skip if another rebuild started
-          
-          const threadedPosts = createThreadedPosts(postsWithChildren);
-          const threadedArray = createThreadedPostsArray(originalPosts, threadedPosts);
-          
-          reorderedPostsCache = threadedArray;
-          console.log(`[Threadify] Applied threading with minimal children (${threadedPosts.length} posts)`);
-          
-          setTimeout(() => {
-            m.redraw();
-          }, 10);
-        })
-        .catch(error => {
-          console.warn('[Threadify] Minimal child loading failed, using basic threading:', error);
-          // Fallback to basic threading
-          const threadedPosts = createThreadedPosts(validPosts);
-          const threadedArray = createThreadedPostsArray(originalPosts, threadedPosts);
-          reorderedPostsCache = threadedArray;
-        })
-        .finally(() => {
-          isReordering = false;
+
+    // 1) 先补父帖（递归到根）
+    ensureParentsLoaded(postStream, validPosts)
+      // 2) 可选：再保守补少量子帖，减少首屏“跳动”
+      .then((postsWithParents) =>
+        enableMinimalChildLoading
+          ? ensureMinimalChildren(postStream, postsWithParents)
+          : postsWithParents
+      )
+      // 3) 基于“父后跟子（各层内按时间升序）”线性化为线程顺序
+      .then((postsReady) => {
+        const threaded = createThreadedPosts(postsReady);
+        const threadedArray = createThreadedPostsArray(originalPosts, threaded);
+
+        // 建立 postId->顺序索引，供状态层排序兜底
+        threadedOrder = new Map();
+        let idx = 0;
+        threadedArray.forEach((p) => {
+          if (p && p.id) threadedOrder.set(p.id(), idx++);
         });
-    } else {
-      // Simple threading with current posts only - no context loading
-      const threadedPosts = createThreadedPosts(validPosts);
-      const threadedArray = createThreadedPostsArray(originalPosts, threadedPosts);
-      
-      // Update cache
-      reorderedPostsCache = threadedArray;
-      
-      console.log(`[Threadify] Applied simple threading (${threadedPosts.length} posts)`);
-      
-      // Force immediate redraw
-      setTimeout(() => {
-        m.redraw();
-      }, 10);
-      
-      isReordering = false;
-    }
-    
-  } catch (error) {
-    console.error('[Threadify] Cache update failed:', error);
+
+        finishWith(threadedArray);
+      })
+      .catch((err) => {
+        console.warn('[Threadify] parent/child load failed, fallback threading:', err);
+        const threaded = createThreadedPosts(validPosts);
+        const threadedArray = createThreadedPostsArray(originalPosts, threaded);
+
+        threadedOrder = new Map();
+        let idx = 0;
+        threadedArray.forEach((p) => {
+          if (p && p.id) threadedOrder.set(p.id(), idx++);
+        });
+
+        finishWith(threadedArray);
+      });
+
+  } catch (e) {
+    console.error('[Threadify] Cache update failed:', e);
+    finishWith(null);
+  }
+
+  function finishWith(arrayOrNull) {
+    reorderedPostsCache = arrayOrNull;
     isReordering = false;
+    // 触发重绘
+    setTimeout(() => m.redraw(), 0);
   }
 }
 
-/**
- * Create threaded posts array that preserves all loaded posts in threaded order
- * 
- * Instead of trying to maintain original positions, this creates an array
- * where posts appear in proper threaded order, followed by any null entries
- * for unloaded posts (to maintain pagination).
- * 
- * @param {(Post|null)[]} originalPosts - Original posts array from PostStream
- * @param {Post[]} threadedPosts - Posts in threaded order
- * @returns {(Post|null)[]} - Array with all posts in threaded order
- */
+// 维持分页长度：线程顺序 + 末尾填充 null 占位
 function createThreadedPostsArray(originalPosts, threadedPosts) {
-  if (!threadedPosts || threadedPosts.length === 0) {
+  if (!Array.isArray(threadedPosts) || threadedPosts.length === 0) {
     return originalPosts;
   }
-  
-  // Start with all threaded posts in their correct order
   const result = [...threadedPosts];
-  
-  // Count how many non-null posts were in the original array
-  const originalNonNullCount = originalPosts.filter(p => p !== null).length;
-  
-  // If we have more threaded posts than original non-null posts,
-  // it means we loaded additional parent/child posts - that's great!
-  // If we have fewer, we need to pad with nulls to maintain pagination
   const nullsNeeded = Math.max(0, originalPosts.length - threadedPosts.length);
-  
-  // Add null entries at the end to maintain original array length for pagination
-  for (let i = 0; i < nullsNeeded; i++) {
-    result.push(null);
-  }
-  
+  for (let i = 0; i < nullsNeeded; i++) result.push(null);
   return result;
 }
 
-/**
- * Get the current threaded posts cache
- * 
- * @returns {(Post|null)[]|null} - The cached threaded posts or null if not available
- */
+// ----------------- 父/子帖补全（含本地兜底） -----------------
+function ensureParentsLoaded(postStream, posts) {
+  // 优先使用工具模块；若失败/不存在，则走本地兜底
+  if (typeof loadMissingParentPosts === 'function') {
+    // 兼容 PostLoader 对入参的期望：需要 discussion 属性
+    const ctx = postStream.discussion
+      ? postStream
+      : { discussion: postStream.stream.discussion };
+    return loadMissingParentPosts(ctx, posts).catch(() => fallbackLoadParents(posts));
+  }
+  return fallbackLoadParents(posts);
+}
+
+function ensureMinimalChildren(postStream, posts) {
+  if (typeof loadMinimalChildren === 'function') {
+    const ctx = postStream.discussion
+      ? postStream
+      : { discussion: postStream.stream.discussion };
+    return loadMinimalChildren(ctx, posts).catch(() => posts);
+  }
+  return Promise.resolve(posts);
+}
+
+// 兜底：直接通过 API 递归补齐所有缺失父帖
+function fallbackLoadParents(currentPosts) {
+  const byId = new Map(currentPosts.filter(Boolean).map((p) => [String(p.id()), p]));
+  const missing = [];
+
+  currentPosts.forEach((p) => {
+    const pid = p && p.attribute ? p.attribute('parent_id') : null;
+    if (pid && !byId.has(String(pid))) missing.push(String(pid));
+  });
+
+  if (missing.length === 0) return Promise.resolve(currentPosts);
+
+  return app.store
+    .find('posts', { filter: { id: missing.join(',') } })
+    .then((loadedParents) => {
+      const combined = [...currentPosts, ...loadedParents];
+      // 递归直到没有缺失父帖
+      return fallbackLoadParents(combined);
+    })
+    .catch(() => currentPosts);
+}
+
+// ----------------- 状态 & 调试导出（与原版保持兼容） -----------------
 export function getThreadedPostsCache() {
   return reorderedPostsCache;
 }
 
-/**
- * Force rebuild of the threaded posts cache
- * 
- * Useful for external components that need to trigger a cache rebuild,
- * such as after manual post operations.
- * 
- * @param {PostStream} postStream - The PostStream instance
- */
 export function forceRebuildCache(postStream) {
-  console.log('[Threadify] Force rebuilding cache');
-  
-  // Clear existing cache and depth cache
   reorderedPostsCache = null;
+  threadedOrder = null;
   clearThreadDepthCache();
-  
-  // Use the simplified rebuild approach
   updateReorderedCache(postStream);
 }
 
-/**
- * Check if threading is currently active
- * 
- * @returns {boolean} - True if threading is active and cache is available
- */
 export function isThreadingActive() {
   return !!(reorderedPostsCache && originalPostsMethod);
 }
 
-/**
- * Get threading statistics for debugging
- * 
- * @returns {Object} - Object containing threading statistics
- */
 export function getThreadingStats() {
   return {
     hasCachedPosts: !!reorderedPostsCache,
-    cachedPostCount: reorderedPostsCache ? reorderedPostsCache.filter(p => p).length : 0,
-    isReordering: isReordering,
-    lastPostCount: lastPostCount,
-    hasOriginalMethod: !!originalPostsMethod
-  };
-} 
-
-/**
- * Get debug information about the current threading state
- * 
- * @returns {Object} - Debug information object
- */
-export function getThreadingDebugInfo() {
-  return {
-    isReordering: isReordering,
-    hasCachedPosts: !!reorderedPostsCache,
-    cachedPostCount: reorderedPostsCache ? reorderedPostsCache.filter(p => p).length : 0,
-    lastPostCount: lastPostCount,
-    hasOriginalMethod: !!originalPostsMethod
+    cachedPostCount: reorderedPostsCache ? reorderedPostsCache.filter(Boolean).length : 0,
+    isReordering,
+    lastPostCount,
+    hasOriginalMethod: !!originalPostsMethod,
+    discussionId: currentDiscussionId,
   };
 }
 
-/**
- * Log detailed threading debug information
- */
-export function logThreadingDebug() {
-  const info = getThreadingDebugInfo();
-  console.log('[Threadify] Debug Info:', info);
-  
+export function getThreadingDebugInfo() {
+  const info = getThreadingStats();
   if (reorderedPostsCache) {
-    const posts = reorderedPostsCache.filter(p => p);
-    console.log('[Threadify] Cache contains posts:', posts.map(p => `#${p.id()} (parent: ${p.attribute('parent_id') || 'none'})`));
+    info.sample =
+      reorderedPostsCache
+        .filter(Boolean)
+        .slice(0, 10)
+        .map((p) => `#${p.id()}(parent:${p.attribute('parent_id') || 'none'})`) || [];
   }
-} 
+  return info;
+}
 
-/**
- * Enable or disable minimal child loading
- * 
- * @param {boolean} enabled - Whether to enable minimal child loading
- */
+export function logThreadingDebug() {
+  console.log('[Threadify] Debug:', getThreadingDebugInfo());
+}
+
 export function setMinimalChildLoading(enabled) {
-  enableMinimalChildLoading = enabled;
-  console.log(`[Threadify] Minimal child loading ${enabled ? 'enabled' : 'disabled'}`);
-} 
+  enableMinimalChildLoading = !!enabled;
+  console.log(`[Threadify] Minimal child loading ${enableMinimalChildLoading ? 'enabled' : 'disabled'}`);
+}
+
+// ----------------- 工具 -----------------
+function resetState(discussionId) {
+  currentDiscussionId = discussionId;
+  isReordering = false;
+  reorderedPostsCache = null;
+  lastPostCount = 0;
+  originalPostsMethod = null;
+  threadedOrder = null;
+  clearThreadDepthCache();
+}
