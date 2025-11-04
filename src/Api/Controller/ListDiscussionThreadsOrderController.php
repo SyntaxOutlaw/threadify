@@ -4,7 +4,6 @@ namespace SyntaxOutlaw\Threadify\Api\Controller;
 
 use Flarum\Discussion\Discussion;
 use Flarum\Http\RequestUtil;
-use Flarum\User\Exception\PermissionDeniedException;
 use Illuminate\Database\ConnectionInterface;
 use Laminas\Diactoros\Response\JsonResponse;
 use Psr\Http\Message\ServerRequestInterface;
@@ -18,43 +17,42 @@ class ListDiscussionThreadsOrderController implements RequestHandlerInterface
         $route = $request->getAttribute('routeParameters', []);
         $discussionId = (int) ($route['id'] ?? 0);
 
-        // 1) 讨论存在 & 鉴权
-        $discussion = Discussion::findOrFail($discussionId);
-        if (! $actor->can('view', $discussion)) {
-            throw new PermissionDeniedException();
-        }
+        // 1) 可见性校验：使用 whereVisibleTo($actor) 与核心保持一致（修复普通用户 403）
+        $discussion = Discussion::query()
+            ->whereVisibleTo($actor)
+            ->findOrFail($discussionId);
 
         /** @var ConnectionInterface $db */
         $db = resolve(ConnectionInterface::class);
 
         try {
-            // 2) 线程表缺失时优雅返回
+            // 2) 线程表缺失时优雅返回（避免 500）
             if (! $db->getSchemaBuilder()->hasTable('threadify_threads')) {
                 return new JsonResponse([
                     'discussionId' => $discussionId,
-                    'order' => [],
-                    'count' => 0,
-                    'note'  => 'threadify_threads table missing',
+                    'order'        => [],
+                    'count'        => 0,
+                    'note'         => 'threadify_threads table missing',
                 ]);
             }
 
-            // 3) 读取本讨论的线程行 + posts.created_at（不选 posts.updated_at）
-            $rows = $db->table('threadify_threads')
-                ->join('posts', 'posts.id', '=', 'threadify_threads.post_id')
-                ->where('threadify_threads.discussion_id', $discussionId)
+            // 3) 读取本讨论的线程行 + posts.created_at（不选 posts.updated_at，规避部分环境无列问题）
+            $rows = $db->table('threadify_threads as t')
+                ->join('posts as p', 'p.id', '=', 't.post_id')
+                ->where('t.discussion_id', $discussionId)
                 ->select([
-                    'threadify_threads.post_id',
-                    'threadify_threads.parent_post_id',
-                    'threadify_threads.depth',
+                    't.post_id',
+                    't.parent_post_id',
+                    't.depth',
                     // 两个时间都取出：优先用线程表的 created_at，缺失再用 posts.created_at
-                    'threadify_threads.created_at as t_created_at',
-                    'posts.created_at as p_created_at',
+                    't.created_at as t_created_at',
+                    'p.created_at as p_created_at',
                 ])
-                // 先按线程表的 created_at 升序，缺失情况下排序仍然稳定
-                ->orderBy('threadify_threads.created_at', 'asc')
+                // 先按 t.created_at 升序，后续在 PHP 中对同父兄弟再做稳定时间排序
+                ->orderBy('t.created_at', 'asc')
                 ->get();
 
-            // 4) 邻接表（父->子）
+            // 4) 邻接表（父 -> 子）
             $byParent = [];
             foreach ($rows as $r) {
                 $pid = $r->parent_post_id ?: 0;
@@ -128,4 +126,3 @@ class ListDiscussionThreadsOrderController implements RequestHandlerInterface
         }
     }
 }
-
