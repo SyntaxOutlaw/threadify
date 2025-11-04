@@ -41,7 +41,9 @@ function streamBusy(state) {
 
 // 取讨论 id（兼容性）
 function getDid(ps) {
-  return ps?.stream?.discussion?.id?.() ?? ps?.discussion?.id?.() ?? null;
+  const stream = ps && ps.stream;
+  const disc = stream && stream.discussion;
+  return disc && disc.id && disc.id();
 }
 
 // 等空闲执行（最多 2s）
@@ -49,7 +51,7 @@ function waitForIdle(postStream, fn, tries = 40) {
   const state = postStream && postStream.stream;
   if (!state) return fn();
   if (!streamBusy(state)) {
-    try { return requestAnimationFrame(() => fn()); } catch { return setTimeout(fn, 0); }
+    try { return requestAnimationFrame(() => fn()); } catch (e) { return setTimeout(fn, 0); }
   }
   if (tries <= 0) return;
   setTimeout(() => waitForIdle(postStream, fn, tries - 1), 50);
@@ -63,18 +65,20 @@ function buildOrderMap(postStream) {
   const finish = (map) => {
     orderMap = map || null;
     building = false;
-    try { m.redraw(); } catch {}
+    try { m.redraw(); } catch (e) {}
   };
 
   try {
-    const original = originalPostsMethod.call(postStream.stream) || [];
+    const original = originalPostsMethod ? (originalPostsMethod.call(postStream.stream) || []) : [];
     const posts = original.filter((x) => x && typeof x.id === 'function');
     if (posts.length === 0) return finish(null);
 
     const ctx = postStream.discussion ? postStream : { discussion: postStream.stream.discussion };
 
     loadMissingParentPosts(ctx, posts)
-      .then((withParents) => loadMinimalChildren(ctx, withParents).catch(() => withParents))
+      .then((withParents) => {
+        return loadMinimalChildren(ctx, withParents).catch(() => withParents);
+      })
       .then((ready) => {
         const threaded = createThreadedPosts(ready);
         const map = new Map();
@@ -110,9 +114,9 @@ function mergeBackKeepingPlaceholders(originalArray, orderedPostsOnly) {
 // 依据“预取 + 本地顺序”对帖子项排序（稳定）
 function sortPostsOnly(did, postsOnly) {
   const list = postsOnly.slice();
-  // 稳定排序：预取优先，再本地父后子；都缺时保持原位
   list.sort((a, b) => {
-    const aid = a.id(), bid = b.id();
+    const aid = a.id();
+    const bid = b.id();
 
     const ao = getOrderIndex(did, aid);
     const bo = getOrderIndex(did, bid);
@@ -122,8 +126,8 @@ function sortPostsOnly(did, postsOnly) {
       if (ao !== bo) return ao - bo;
     }
 
-    const toA = orderMap?.get?.(aid);
-    const toB = orderMap?.get?.(bid);
+    const toA = orderMap && orderMap.get && orderMap.get(aid);
+    const toB = orderMap && orderMap.get && orderMap.get(bid);
     if (toA != null || toB != null) {
       if (toA == null) return 1;
       if (toB == null) return -1;
@@ -157,17 +161,18 @@ export function initThreadedPostStream() {
 
     // 预取完成 → 空闲时构建一次本地顺序映射
     this._threadifyOrderHandler = (ev) => {
-      if (String(did) !== String(ev?.detail)) return;
+      const readyDid = ev && ev.detail;
+      if (String(did) !== String(readyDid)) return;
       waitForIdle(this, () => buildOrderMap(this));
     };
-    try { window.addEventListener('threadify:orderReady', this._threadifyOrderHandler); } catch {}
+    try { window.addEventListener('threadify:orderReady', this._threadifyOrderHandler); } catch (e) {}
 
     // 首帧后空闲也构建一次（预取未命中时的兜底）
     waitForIdle(this, () => buildOrderMap(this));
 
-    // —— 仅覆写“返回值”：保持长度与占位不变 —— //
+    // —— 覆写“返回值”：保持长度与占位不变 —— //
     this.stream.posts = () => {
-      const original = originalPostsMethod.call(this.stream) || [];
+      const original = originalPostsMethod ? (originalPostsMethod.call(this.stream) || []) : [];
 
       // 忙碌期：不排序，直接回源
       if (streamBusy(this.stream)) {
@@ -207,6 +212,42 @@ export function initThreadedPostStream() {
 
   // 已加载集合变化 → 清缓存并空闲期重建本地顺序映射
   extend(PostStream.prototype, 'onupdate', function () {
-    const cur = originalPostsMethod ? originalPostsMethod.call(this.stream) || [] : [];
+    const cur = originalPostsMethod ? (originalPostsMethod.call(this.stream) || []) : [];
     const sig = idsSignature(cur);
-    if (sig !== lastL
+    if (sig !== lastLoadedIdsSig) {
+      lastLoadedIdsSig = sig;
+      cacheSig = '';
+      cachedReturn = null;
+      clearThreadDepthCache();
+      waitForIdle(this, () => buildOrderMap(this));
+    }
+  });
+
+  // 清理监听
+  extend(PostStream.prototype, 'onremove', function () {
+    try {
+      if (this._threadifyOrderHandler) {
+        window.removeEventListener('threadify:orderReady', this._threadifyOrderHandler);
+        this._threadifyOrderHandler = null;
+      }
+    } catch (e) {}
+  });
+}
+
+// ---- 调试导出（可选） ----------------------------------------------
+export function isThreadingActive() { return !!orderMap; }
+export function getThreadingStats() {
+  return { hasOrderMap: !!orderMap, building, discussionId: currentDiscussionId };
+}
+
+function resetState(discussionId) {
+  currentDiscussionId = discussionId || null;
+  originalPostsMethod = null;
+  orderMap = null;
+  building = false;
+  lastLoadedIdsSig = '';
+  cacheSig = '';
+  cachedReturn = null;
+  clearThreadDepthCache();
+}
+
