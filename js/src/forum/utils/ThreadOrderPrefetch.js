@@ -5,6 +5,7 @@
  *  - getOrderIndex(did, postId) -> number|undefined
  *  - getDepthPrefetched(did, postId) / getParentPrefetched(did, postId)
  *  - isPrefetched(did) -> boolean
+ *  - collectChildrenIdsForParents(did, parentIds, limitPerParent=8, pick='latest', maxTotal=40)
  *
  * 行为：
  *  - 预取成功后触发：window.dispatchEvent(new CustomEvent('threadify:orderReady', { detail:Number(did) }))
@@ -49,10 +50,7 @@ export function prefetchThreadOrder(discussionId) {
       entry.map = map;
       entry.ready = true;
 
-      // 通知 PostStream 空闲时构建一次顺序映射
       try { window.dispatchEvent(new CustomEvent('threadify:orderReady', { detail: Number(did) })); } catch {}
-
-      // 允许轻量重绘（与 anchorScroll 不同帧）
       try { setTimeout(() => m.redraw(), 0); } catch {}
     })
     .catch((e) => {
@@ -87,4 +85,43 @@ export function getParentPrefetched(discussionId, postId) {
 export function isPrefetched(discussionId) {
   const entry = _cache.get(String(discussionId));
   return !!(entry && entry.ready === true);
+}
+
+/**
+ * 从预取映射中为一组父帖收集子帖 ID（按 order 排序）
+ * @param {number|string} discussionId
+ * @param {Iterable<number|string>} parentIds
+ * @param {number} limitPerParent 每个父帖最多取多少子帖
+ * @param {'latest'|'earliest'} pick 选最新还是最早的子帖
+ * @param {number} maxTotal 本次最多返回多少条，防止一次性过大
+ * @returns {number[]} 子帖 ID（去重后）
+ */
+export function collectChildrenIdsForParents(discussionId, parentIds, limitPerParent = 8, pick = 'latest', maxTotal = 40) {
+  const entry = _cache.get(String(discussionId));
+  if (!entry?.map || !parentIds) return [];
+
+  const pset = new Set([...parentIds].map((x) => Number(x)));
+  if (pset.size === 0) return [];
+
+  // 先把所有候选子帖取出来：Map<parentId, Array<{postId, order}>>
+  const buckets = new Map();
+  for (const [postId, rec] of entry.map.entries()) {
+    const pid = rec?.parentId;
+    if (!pid || !pset.has(pid)) continue;
+    let arr = buckets.get(pid);
+    if (!arr) { arr = []; buckets.set(pid, arr); }
+    arr.push({ postId: Number(postId), order: rec.order || 0 });
+  }
+
+  // 对每个父帖的孩子按 order 排序后截取
+  const out = [];
+  for (const [pid, arr] of buckets.entries()) {
+    arr.sort((a, b) => a.order - b.order);
+    const picked = pick === 'earliest' ? arr.slice(0, limitPerParent) : arr.slice(-limitPerParent);
+    for (const it of picked) out.push(it.postId);
+    if (out.length >= maxTotal) break;
+  }
+
+  // 去重裁剪
+  return Array.from(new Set(out)).slice(0, maxTotal);
 }
