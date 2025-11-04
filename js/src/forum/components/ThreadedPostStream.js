@@ -1,197 +1,71 @@
+// js/src/forum/components/ThreadedPostStream.js
 import app from 'flarum/forum/app';
-import { extend } from 'flarum/common/extend';
-import PostStream from 'flarum/forum/components/PostStream';
+import { extend, override } from 'flarum/common/extend';
 import PostStreamState from 'flarum/forum/states/PostStreamState';
+import PostStream from 'flarum/forum/components/PostStream';
 
-import { createThreadedPosts } from '../utils/ThreadTree';
-import { clearThreadDepthCache } from '../utils/ThreadDepth';
-import { loadMissingParentPosts, loadMinimalChildren } from '../utils/PostLoader';
-import { getOrderIndex, prefetchThreadOrder } from '../utils/ThreadOrderPrefetch';
+import { prefetchThreadOrder, getOrderIndex } from '../utils/ThreadOrderPrefetch';
 
-// 状态
-let isReordering = false;
-let reorderedPostsCache = null;
-let lastPostCount = 0;
-let originalPostsMethod = null;
-let currentDiscussionId = null;
-let threadedOrder = null;
-let enableMinimalChildLoading = true;
+/**
+ * 仅做“可见列表”层面的稳定排序：
+ * - 不覆盖 this.stream.posts（保留楼层号/分页锚点的不变量）
+ * - 不在分页进行中排序，避免 anchorScroll 取不到锚点
+ * - 返回新数组，不原地 sort
+ */
+
+let pagingDepth = 0; // >0 表示正在分页装载（上一页/下一页）
 
 export function initThreadedPostStream() {
+  // 讨论切换时，尝试预取顺序（极轻量）
   extend(PostStream.prototype, 'oninit', function () {
-    const did = this.stream.discussion.id();
-    if (currentDiscussionId !== did) resetState(did);
-    if (!originalPostsMethod) originalPostsMethod = this.stream.posts;
-
-    // 保险：确保触发一次预取（如果 index.js 那边刚好没命中）
-    prefetchThreadOrder(did);
-
-    this.stream.posts = () => {
-      if (reorderedPostsCache) return reorderedPostsCache;
-      const original = originalPostsMethod.call(this.stream);
-      if (!isReordering && original && original.filter(Boolean).length > 0) {
-        updateReorderedCache(this, { firstKick: true });
-      }
-      return original;
-    };
-
-    const cur = originalPostsMethod.call(this.stream) || [];
-    lastPostCount = cur.filter(Boolean).length;
-    if (lastPostCount > 0) updateReorderedCache(this, { firstKick: true });
+    const did = this.stream && this.stream.discussion && this.stream.discussion.id();
+    if (did) prefetchThreadOrder(did);
   });
 
-  // 可见列表排序兜底：优先“预取顺序”，再用线程化顺序
-  extend(PostStreamState.prototype, 'visiblePosts', function (result) {
-    if (!Array.isArray(result) || result.length <= 1) return;
-
-    const did = this.discussion && this.discussion.id && this.discussion.id();
-    result.sort((a, b) => {
-      const aid = a && a.id ? a.id() : undefined;
-      const bid = b && b.id ? b.id() : undefined;
-      if (!aid || !bid) return 0;
-
-      // 1) 预取顺序（最早就位）
-      const ao = getOrderIndex(did, aid);
-      const bo = getOrderIndex(did, bid);
-      if (ao != null || bo != null) {
-        if (ao == null) return 1;
-        if (bo == null) return -1;
-        if (ao !== bo) return ao - bo;
-      }
-
-      // 2) 线程化顺序（缓存重建后）
-      const toA = threadedOrder && threadedOrder.get(aid);
-      const toB = threadedOrder && threadedOrder.get(bid);
-      if (toA != null || toB != null) {
-        if (toA == null) return 1;
-        if (toB == null) return -1;
-        if (toA !== toB) return toA - toB;
-      }
-
-      return 0;
+  // 包一层：分页开始/结束时标记状态
+  override(PostStreamState.prototype, '_loadPrevious', function (original, ...args) {
+    pagingDepth++;
+    const p = original(...args);
+    return Promise.resolve(p).finally(() => {
+      pagingDepth = Math.max(0, pagingDepth - 1);
     });
   });
 
-  extend(PostStream.prototype, 'onupdate', function () {
-    if (!originalPostsMethod) return;
-    const current = originalPostsMethod.call(this.stream) || [];
-    const count = current.filter(Boolean).length;
-    if (count !== lastPostCount) {
-      lastPostCount = count;
-      reorderedPostsCache = null;
-      threadedOrder = null;
-      clearThreadDepthCache();
-      updateReorderedCache(this);
-    }
+  override(PostStreamState.prototype, '_loadNext', function (original, ...args) {
+    pagingDepth++;
+    const p = original(...args);
+    return Promise.resolve(p).finally(() => {
+      pagingDepth = Math.max(0, pagingDepth - 1);
+    });
   });
-}
 
-// ----- 线程化缓存构建（与之前一致，略） -----
-function updateReorderedCache(postStream) {
-  if (isReordering) return;
-  isReordering = true;
-  try {
-    if (!originalPostsMethod) return finish(null);
+  // 只对“可见列表”排序；分页时直接返回原结果
+  extend(PostStreamState.prototype, 'visiblePosts', function (result) {
+    if (!Array.isArray(result) || result.length <= 1) return result;
+    if (pagingDepth > 0) return result; // 正在分页，避免打断锚点
 
-    const originalPosts = originalPostsMethod.call(postStream.stream) || [];
-    const validPosts = originalPosts.filter(Boolean);
-    if (validPosts.length === 0) return finish(null);
+    const did = this.discussion && this.discussion.id && this.discussion.id();
 
-    ensureParentsLoaded(postStream, validPosts)
-      .then((postsWithParents) =>
-        enableMinimalChildLoading
-          ? ensureMinimalChildren(postStream, postsWithParents)
-          : postsWithParents
-      )
-      .then((postsReady) => {
-        const threaded = createThreadedPosts(postsReady);
-        const threadedArray = createThreadedPostsArray(originalPosts, threaded);
+    // 复制一份，保持纯函数
+    const out = result.slice();
 
-        threadedOrder = new Map();
-        let idx = 0;
-        threadedArray.forEach((p) => { if (p && p.id) threadedOrder.set(p.id(), idx++); });
+    // 使用预取顺序排序；没有顺序信息时保持原相对顺序
+    out.sort((a, b) => {
+      const aid = a && a.id ? a.id() : null;
+      const bid = b && b.id ? b.id() : null;
+      if (!aid || !bid) return 0;
 
-        finish(threadedArray);
-      })
-      .catch((err) => {
-        console.warn('[Threadify] load parent/child failed, fallback threading:', err);
-        const threaded = createThreadedPosts(validPosts);
-        const threadedArray = createThreadedPostsArray(originalPosts, threaded);
-        threadedOrder = new Map();
-        let idx = 0;
-        threadedArray.forEach((p) => { if (p && p.id) threadedOrder.set(p.id(), idx++); });
-        finish(threadedArray);
-      });
+      const ao = getOrderIndex(did, aid);
+      const bo = getOrderIndex(did, bid);
 
-  } catch (e) {
-    console.error('[Threadify] Cache update failed:', e);
-    finish(null);
-  }
+      if (ao == null && bo == null) return 0; // 两个都没有记录：不动
+      if (ao == null) return 1;               // 有记录的优先
+      if (bo == null) return -1;
 
-  function finish(arr) {
-    reorderedPostsCache = arr;
-    isReordering = false;
-    setTimeout(() => m.redraw(), 0);
-  }
-}
+      // 都有记录：按 threads-order 升序
+      return ao - bo;
+    });
 
-function createThreadedPostsArray(originalPosts, threadedPosts) {
-  if (!Array.isArray(threadedPosts) || threadedPosts.length === 0) return originalPosts;
-  const result = [...threadedPosts];
-  const nullsNeeded = Math.max(0, originalPosts.length - threadedPosts.length);
-  for (let i = 0; i < nullsNeeded; i++) result.push(null);
-  return result;
-}
-
-function ensureParentsLoaded(postStream, posts) {
-  if (typeof loadMissingParentPosts === 'function') {
-    const ctx = postStream.discussion ? postStream : { discussion: postStream.stream.discussion };
-    return loadMissingParentPosts(ctx, posts).catch(() => fallbackLoadParents(posts));
-  }
-  return fallbackLoadParents(posts);
-}
-function ensureMinimalChildren(postStream, posts) {
-  if (typeof loadMinimalChildren === 'function') {
-    const ctx = postStream.discussion ? postStream : { discussion: postStream.stream.discussion };
-    return loadMinimalChildren(ctx, posts).catch(() => posts);
-  }
-  return Promise.resolve(posts);
-}
-function fallbackLoadParents(currentPosts) {
-  const byId = new Map(currentPosts.filter(Boolean).map((p) => [String(p.id()), p]));
-  const missing = [];
-  currentPosts.forEach((p) => {
-    const pid = p && p.attribute ? p.attribute('parent_id') : null;
-    if (pid && !byId.has(String(pid))) missing.push(String(pid));
+    return out;
   });
-  if (missing.length === 0) return Promise.resolve(currentPosts);
-
-  return app.store
-    .find('posts', { filter: { id: missing.join(',') } })
-    .then((loaded) => fallbackLoadParents([...currentPosts, ...loaded]))
-    .catch(() => currentPosts);
-}
-
-// 导出（保持兼容）
-export function getThreadedPostsCache() { return reorderedPostsCache; }
-export function forceRebuildCache(postStream) {
-  reorderedPostsCache = null; threadedOrder = null; clearThreadDepthCache(); updateReorderedCache(postStream);
-}
-export function isThreadingActive() { return !!(reorderedPostsCache && originalPostsMethod); }
-export function getThreadingStats() {
-  return {
-    hasCachedPosts: !!reorderedPostsCache,
-    cachedPostCount: reorderedPostsCache ? reorderedPostsCache.filter(Boolean).length : 0,
-    isReordering, lastPostCount, hasOriginalMethod: !!originalPostsMethod, discussionId: currentDiscussionId,
-  };
-}
-
-function resetState(discussionId) {
-  currentDiscussionId = discussionId;
-  isReordering = false;
-  reorderedPostsCache = null;
-  lastPostCount = 0;
-  originalPostsMethod = null;
-  threadedOrder = null;
-  clearThreadDepthCache();
 }
