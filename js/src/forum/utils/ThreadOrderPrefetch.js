@@ -6,23 +6,21 @@
  *  - getOrderIndex(did, postId) -> number|undefined
  *  - getDepthPrefetched(did, postId) / getParentPrefetched(did, postId)
  *  - isPrefetched(did) -> boolean
+ *
+ * 行为：
+ *  - 预取成功后触发：window.dispatchEvent(new CustomEvent('threadify:orderReady', { detail:Number(did) }))
+ *  - 失败也将 ready 置为 true，避免重复打爆接口（map 为空则自然回退到本地线程顺序）
  */
 
 import app from 'flarum/forum/app';
 
 const _cache = new Map(); // did -> { map: Map<postId, {order, depth, parentId}>, ready: Promise|true }
 
-/**
- * 预取某讨论的线程顺序（体积很小）
- * 成功后将结果写入内存缓存；失败时保留空 map，避免重复请求风暴。
- * 不触发 m.redraw()，以免打断核心滚动流程。
- */
 export function prefetchThreadOrder(discussionId) {
   const did = String(discussionId);
-
   const existing = _cache.get(did);
-  if (existing && existing.ready === true) return Promise.resolve();
-  if (existing && existing.ready && typeof existing.ready.then === 'function') return existing.ready;
+  if (existing?.ready === true) return Promise.resolve();
+  if (existing?.ready && typeof existing.ready.then === 'function') return existing.ready;
 
   const entry = { map: new Map(), ready: null };
   _cache.set(did, entry);
@@ -34,19 +32,13 @@ export function prefetchThreadOrder(discussionId) {
     })
     .then((res) => {
       const map = new Map();
-
-      // —— 兜底处理：后端若无 order 字段或返回格式异常，使用空数组 —— //
       const list = Array.isArray(res?.order) ? res.order : [];
-
-      // 期望每项形如：{ postId, order, depth, parentPostId }
       for (const item of list) {
         if (!item) continue;
         const pid = Number(item.postId);
         const ord = Number(item.order);
         const dep = Number(item.depth);
         const parent = item.parentPostId != null ? Number(item.parentPostId) : null;
-
-        // 只记录合法的 postId / order
         if (!Number.isNaN(pid) && !Number.isNaN(ord)) {
           map.set(pid, {
             order: ord,
@@ -55,13 +47,18 @@ export function prefetchThreadOrder(discussionId) {
           });
         }
       }
-
       entry.map = map;
-      entry.ready = true; // ✅ 预取完成
+      entry.ready = true;
+
+      // 通知 PostStream 空闲时构建一次顺序映射
+      try { window.dispatchEvent(new CustomEvent('threadify:orderReady', { detail: Number(did) })); } catch {}
+
+      // 允许轻量重绘（与 anchorScroll 不同帧）
+      try { setTimeout(() => m.redraw(), 0); } catch {}
     })
     .catch((e) => {
       console.warn('[Threadify] order prefetch failed:', e);
-      // 失败时仍将 ready 置为 true（但 map 为空），防止重复打爆接口
+      // 标记完成以免风暴；map 为空则排序回退到本地线程顺序
       entry.ready = true;
     });
 
@@ -70,21 +67,21 @@ export function prefetchThreadOrder(discussionId) {
 
 export function getOrderIndex(discussionId, postId) {
   const entry = _cache.get(String(discussionId));
-  if (!entry || !entry.map) return undefined;
+  if (!entry?.map) return undefined;
   const rec = entry.map.get(Number(postId));
   return rec ? rec.order : undefined;
 }
 
 export function getDepthPrefetched(discussionId, postId) {
   const entry = _cache.get(String(discussionId));
-  if (!entry || !entry.map) return undefined;
+  if (!entry?.map) return undefined;
   const rec = entry.map.get(Number(postId));
   return rec ? rec.depth : undefined;
 }
 
 export function getParentPrefetched(discussionId, postId) {
   const entry = _cache.get(String(discussionId));
-  if (!entry || !entry.map) return undefined;
+  if (!entry?.map) return undefined;
   const rec = entry.map.get(Number(postId));
   return rec ? rec.parentId : undefined;
 }
