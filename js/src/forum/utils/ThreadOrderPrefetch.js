@@ -14,78 +14,49 @@
 
 import app from 'flarum/forum/app';
 
-const _cache = new Map(); // did -> { map: Map<postId, {order, depth, parentId}>, ready: Promise|true }
+const _cache = new Map(); // did -> { map: Map<postId, {order, depth, parentId}>, ready: Promise }
 
 export function prefetchThreadOrder(discussionId) {
   const did = String(discussionId);
-  const existing = _cache.get(did);
-  if (existing?.ready === true) return Promise.resolve();
-  if (existing?.ready && typeof existing.ready.then === 'function') return existing.ready;
+  if (_cache.has(did) && _cache.get(did).ready) return _cache.get(did).ready;
 
   const entry = { map: new Map(), ready: null };
   _cache.set(did, entry);
 
-  entry.ready = app
-    .request({
-      method: 'GET',
-      url: `${app.forum.attribute('apiUrl')}/discussions/${encodeURIComponent(did)}/threads-order`,
-    })
-    .then((res) => {
-      const map = new Map();
-      const list = Array.isArray(res?.order) ? res.order : [];
-      for (const item of list) {
-        if (!item) continue;
-        const pid = Number(item.postId);
-        const ord = Number(item.order);
-        const dep = Number(item.depth);
-        const parent = item.parentPostId != null ? Number(item.parentPostId) : null;
-        if (!Number.isNaN(pid) && !Number.isNaN(ord)) {
-          map.set(pid, {
-            order: ord,
-            depth: Number.isNaN(dep) ? 0 : dep,
-            parentId: parent,
-          });
-        }
-      }
-      entry.map = map;
-      entry.ready = true;
-
-      // 通知 PostStream “顺序可用”，由其在空闲期构建一次顺序映射
-      try { window.dispatchEvent(new CustomEvent('threadify:orderReady', { detail: Number(did) })); } catch {}
-
-      // 分帧轻量重绘，避开与 anchorScroll 同帧
-      try { setTimeout(() => m.redraw(), 0); } catch {}
-    })
-    .catch((e) => {
-      console.warn('[Threadify] order prefetch failed:', e);
-      entry.ready = true; // 防止重复打爆接口
+  entry.ready = app.request({
+    method: 'GET',
+    url: `${app.forum.attribute('apiUrl')}/discussions/${did}/threads-order`,
+  }).then((res) => {
+    const map = new Map();
+    (res.order || []).forEach(({ postId, order, depth, parentPostId }) => {
+      map.set(Number(postId), { order: Number(order), depth: Number(depth), parentId: parentPostId ? Number(parentPostId) : null });
     });
+    entry.map = map;
+    m.redraw(); // 预取完成后让可见列表按顺序重绘（通常很快）
+  }).catch((e) => {
+    console.warn('[Threadify] order prefetch failed', e);
+  });
 
   return entry.ready;
 }
 
 export function getOrderIndex(discussionId, postId) {
   const entry = _cache.get(String(discussionId));
-  if (!entry?.map) return undefined;
+  if (!entry || !entry.map) return undefined;
   const rec = entry.map.get(Number(postId));
   return rec ? rec.order : undefined;
 }
 
 export function getDepthPrefetched(discussionId, postId) {
   const entry = _cache.get(String(discussionId));
-  if (!entry?.map) return undefined;
+  if (!entry || !entry.map) return undefined;
   const rec = entry.map.get(Number(postId));
   return rec ? rec.depth : undefined;
 }
 
 export function getParentPrefetched(discussionId, postId) {
   const entry = _cache.get(String(discussionId));
-  if (!entry?.map) return undefined;
+  if (!entry || !entry.map) return undefined;
   const rec = entry.map.get(Number(postId));
   return rec ? rec.parentId : undefined;
-}
-
-export function isPrefetched(discussionId) {
-  const entry = _cache.get(String(discussionId));
-  return !!(entry && entry.ready === true);
 }
