@@ -7,7 +7,8 @@ import DiscussionListItem from 'flarum/forum/components/DiscussionListItem';
 
 import { initThreadedPost } from './components/ThreadedPost';
 import { initThreadedReplyComposer } from './components/ThreadedReplyComposer';
-import { initThreadedPostStream } from './components/ThreadedPostStream';
+// 注：不再覆盖 PostStream.posts；Flex 排序模式走 DOM 层，不改数组顺序
+import { installFlexOrderMode } from './utils/FlexOrderMode';
 import { prefetchThreadOrder } from './utils/ThreadOrderPrefetch';
 
 /**
@@ -19,7 +20,6 @@ import { prefetchThreadOrder } from './utils/ThreadOrderPrefetch';
   const KEY = 'threadify:logs';
   const methods = ['log', 'info', 'warn', 'debug', 'error'];
 
-  // 避免多次包裹
   if (!window.__threadifyConsoleOriginal) {
     window.__threadifyConsoleOriginal = {};
     methods.forEach((name) => {
@@ -28,19 +28,17 @@ import { prefetchThreadOrder } from './utils/ThreadOrderPrefetch';
     });
   }
 
-  // 默认关闭；读取本地持久化状态
   const persisted =
     typeof localStorage !== 'undefined' ? localStorage.getItem(KEY) : null;
   let enabled = persisted === '1';
 
-  // 应用包裹
   function applyWrap() {
     methods.forEach((name) => {
       const original = window.__threadifyConsoleOriginal[name];
       console[name] = (...args) => {
         const first = args && args[0];
         const isThreadifyMsg = typeof first === 'string' && first.indexOf(NS) === 0;
-        if (isThreadifyMsg && !enabled) return; // 屏蔽本扩展日志
+        if (isThreadifyMsg && !enabled) return;
         return original(...args);
       };
     });
@@ -53,35 +51,27 @@ import { prefetchThreadOrder } from './utils/ThreadOrderPrefetch';
     }
   }
 
-  // 暴露可切换的控制器到全局（控制台使用）
   window.threadifyLogs = {
-    enable() {
-      setEnabled(true);
-      return 'Threadify logs: ON';
-    },
-    disable() {
-      setEnabled(false);
-      return 'Threadify logs: OFF';
-    },
-    toggle() {
-      setEnabled(!enabled);
-      return `Threadify logs: ${enabled ? 'ON' : 'OFF'}`;
-    },
-    status() {
-      return enabled;
-    },
+    enable() { setEnabled(true); return 'Threadify logs: ON'; },
+    disable() { setEnabled(false); return 'Threadify logs: OFF'; },
+    toggle() { setEnabled(!enabled); return `Threadify logs: ${enabled ? 'ON' : 'OFF'}`; },
+    status() { return enabled; },
   };
 
   applyWrap();
 })();
 
 app.initializers.add('syntaxoutlaw-threadify', () => {
-  // 样式/行为初始化
+  // 仍然保留：给帖子元素补充深度类名等（不与 Flex 排序冲突）
   initThreadedPost();
-  initThreadedReplyComposer();
-  initThreadedPostStream();
 
-  // 进入讨论页即预取顺序
+  // 仍然保留：在提交数据时自动填写 parent_id
+  initThreadedReplyComposer();
+
+  // 启用“Flex 可视化排序模式”：不改 posts()，只操作 DOM 的 order 与类名
+  installFlexOrderMode();
+
+  // 进入讨论页即预取顺序（payload 极小）
   extend(DiscussionPage.prototype, 'oninit', function () {
     const did =
       (this.discussion && typeof this.discussion.id === 'function' && this.discussion.id()) ||
@@ -90,7 +80,7 @@ app.initializers.add('syntaxoutlaw-threadify', () => {
     if (did) prefetchThreadOrder(did);
   });
 
-  // 讨论列表项：首个鼠标悬停/触摸即预取，提升命中率
+  // 讨论列表：首个悬停/触摸即预取，提高命中率
   extend(DiscussionListItem.prototype, 'oncreate', function () {
     const discussion = this.attrs.discussion;
     if (!discussion) return;
