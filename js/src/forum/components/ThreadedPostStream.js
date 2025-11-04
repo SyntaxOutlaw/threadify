@@ -15,21 +15,45 @@ let originalPostsMethod = null;
 let lastPostCount = 0;
 let currentDiscussionId = null;
 
-// 分页期间暂停线程化（让 anchorScroll 拿到稳定锚点）
+// 分页期间：彻底暂停线程化（返回原生 posts），避免 anchorScroll 取不到锚点
 let suspendThreading = false;
 let rebuildPending = false;
 
-// 轻量补充：补父 / 少量子
+// 快速滚动期间：同样暂停线程化与可见区排序（避免锚点抖动）
+let isUserScrolling = false;
+let scrollIdleTimer = null;
+
+// 防抖：在滚动或分页结束后的短暂空闲期再重排
+let rebuildTimer = null;
+const REBUILD_DEBOUNCE_MS = 80;   // 经验值：既能消除闪烁又不显迟滞
+const SCROLL_IDLE_MS     = 120;   // 认为用户停止滚动的阈值
+
+// 轻量补充：补父 / 少量子（可开关）
 const enableMinimalChildLoading = true;
 
 export function initThreadedPostStream() {
-  // 分页开始/结束：暂停 → 结束后如有标记再补一次重排
+  // —— 捕捉滚动，进入“滚动期暂停” —— //
+  extend(PostStream.prototype, 'onscroll', function () {
+    isUserScrolling = true;
+    if (scrollIdleTimer) clearTimeout(scrollIdleTimer);
+    scrollIdleTimer = setTimeout(() => {
+      isUserScrolling = false;
+      if (rebuildPending && !suspendThreading) {
+        // 滚动刚刚停止，补一次重排
+        rebuildPending = false;
+        scheduleRebuild(this);
+      }
+    }, SCROLL_IDLE_MS);
+  });
+
+  // 在分页开始/结束时切换“暂停重排”标志，并在结束后补做一次重排
   override(PostStreamState.prototype, '_loadPrevious', function (original, ...args) {
     suspendThreading = true;
     const p = original(...args);
     return Promise.resolve(p).finally(() => {
       suspendThreading = false;
-      if (rebuildPending) {
+      // 分页刚结束，如果此前打了重排标记，就在空闲期补一次
+      if (rebuildPending && !isUserScrolling) {
         rebuildPending = false;
         const ps = this.discussion && this.discussion.postStream ? this.discussion.postStream : null;
         if (ps) scheduleRebuild(ps);
@@ -42,7 +66,7 @@ export function initThreadedPostStream() {
     const p = original(...args);
     return Promise.resolve(p).finally(() => {
       suspendThreading = false;
-      if (rebuildPending) {
+      if (rebuildPending && !isUserScrolling) {
         rebuildPending = false;
         const ps = this.discussion && this.discussion.postStream ? this.discussion.postStream : null;
         if (ps) scheduleRebuild(ps);
@@ -50,32 +74,29 @@ export function initThreadedPostStream() {
     });
   });
 
-  // ✅ 新增：在“可见列表”阶段就按预取顺序做稳定排序，消除闪烁
+  // ✅ 可见列表“轻排序”：只在【不分页 & 不滚动】时按预取顺序稳定排序，避免首屏闪一下
   extend(PostStreamState.prototype, 'visiblePosts', function (result) {
+    if (suspendThreading || isUserScrolling) return;
     if (!Array.isArray(result) || result.length <= 1) return;
 
-    // 当前讨论 id
     const did =
       (this.discussion && typeof this.discussion.id === 'function' && this.discussion.id()) ||
       (this.discussion && this.discussion.id) ||
       null;
 
-    // 就地稳定排序：1) 预取顺序；2)（若无）已计算缓存顺序；3) 否则保持原样
     result.sort((a, b) => {
       const aid = a && a.id ? a.id() : null;
       const bid = b && b.id ? b.id() : null;
       if (!aid || !bid) return 0;
 
-      // 1) 预取顺序：/threads-order
       const ao = getOrderIndex(did, aid);
       const bo = getOrderIndex(did, bid);
+
       if (ao != null || bo != null) {
         if (ao == null) return 1;
         if (bo == null) return -1;
         if (ao !== bo) return ao - bo;
       }
-
-      // 2) 若上一步都没有，就尽量把已有帖子（非 null）排在前面（防御性）
       return 0;
     });
   });
@@ -85,38 +106,40 @@ export function initThreadedPostStream() {
     const did = this.stream && this.stream.discussion && this.stream.discussion.id();
     if (currentDiscussionId !== did) resetState(did);
 
-    if (did) prefetchThreadOrder(did);      // 首帧预取（极小开销）
+    if (did) prefetchThreadOrder(did); // 首帧预取全局顺序（极轻）
 
     if (!originalPostsMethod) originalPostsMethod = this.stream.posts;
 
-    // 覆盖 posts()：分页中返回原生；平时优先返回缓存
+    // 覆盖 posts()：分页/滚动/重排中一律返回原生 posts；其它情况优先返回缓存
     this.stream.posts = () => {
-      if (suspendThreading) {
-        return originalPostsMethod.call(this.stream) || [];
+      if (suspendThreading || isUserScrolling || isReordering) {
+        // ⚠ 保证 anchorScroll 期间拿到的是稳定数组
+        return (originalPostsMethod.call(this.stream) || []).map(x => x ?? null);
       }
       if (reorderedPostsCache) return reorderedPostsCache;
 
-      const original = originalPostsMethod.call(this.stream) || [];
-      if (!isReordering && original.filter(Boolean).length > 0) {
-        scheduleRebuild(this);              // 异步，不阻断首帧
-      }
+      const original = (originalPostsMethod.call(this.stream) || []).map(x => x ?? null);
+      // 初载且有内容时拉起一次重排（异步＋防抖）
+      if (original.filter(Boolean).length > 0) scheduleRebuild(this);
       return original;
     };
 
-    const cur = originalPostsMethod.call(this.stream) || [];
+    // 记录当前帖子数
+    const cur = (originalPostsMethod.call(this.stream) || []).map(x => x ?? null);
     lastPostCount = cur.filter(Boolean).length;
 
-    if (lastPostCount > 0 && !suspendThreading) scheduleRebuild(this);
+    // 首帧尽量重排（若不在分页/滚动中）
+    if (lastPostCount > 0 && !suspendThreading && !isUserScrolling) scheduleRebuild(this);
   });
 
   extend(PostStream.prototype, 'oncreate', function () {
     clearThreadDepthCache();
   });
 
-  // 帖子数变化：分页中仅打标记；结束后补排；非分页立即重排
+  // 帖子数变化：分页/滚动中仅做标记；结束后空闲期补排；非暂停立即重排
   extend(PostStream.prototype, 'onupdate', function () {
     if (!originalPostsMethod) return;
-    const current = originalPostsMethod.call(this.stream) || [];
+    const current = (originalPostsMethod.call(this.stream) || []).map(x => x ?? null);
     const count = current.filter(Boolean).length;
 
     if (count !== lastPostCount) {
@@ -124,7 +147,7 @@ export function initThreadedPostStream() {
       reorderedPostsCache = null;
       clearThreadDepthCache();
 
-      if (suspendThreading) {
+      if (suspendThreading || isUserScrolling) {
         rebuildPending = true;
       } else {
         scheduleRebuild(this);
@@ -136,12 +159,19 @@ export function initThreadedPostStream() {
 // ========== 重排主流程 ========== //
 
 function scheduleRebuild(postStream) {
-  setTimeout(() => updateReorderedCache(postStream), 0);
+  // 滚动/分页中不立刻重排，只做“待办标记”
+  if (suspendThreading || isUserScrolling) {
+    rebuildPending = true;
+    return;
+  }
+  // 防抖：合并短时间内的多次请求
+  if (rebuildTimer) clearTimeout(rebuildTimer);
+  rebuildTimer = setTimeout(() => updateReorderedCache(postStream), REBUILD_DEBOUNCE_MS);
 }
 
 function updateReorderedCache(postStream) {
   if (isReordering) return;
-  if (suspendThreading) {
+  if (suspendThreading || isUserScrolling) {
     rebuildPending = true;
     return;
   }
@@ -150,7 +180,7 @@ function updateReorderedCache(postStream) {
   try {
     if (!originalPostsMethod) return finish(null);
 
-    const originalPosts = originalPostsMethod.call(postStream.stream) || [];
+    const originalPosts = (originalPostsMethod.call(postStream.stream) || []).map(x => x ?? null);
     const valid = originalPosts.filter(Boolean);
     if (valid.length === 0) return finish(null);
 
@@ -163,7 +193,7 @@ function updateReorderedCache(postStream) {
       .then((postsReady) => {
         const did = postStream.stream && postStream.stream.discussion && postStream.stream.discussion.id();
 
-        // 优先按 /threads-order 预取顺序排序
+        // —— 优先按 /threads-order 预取顺序排序 —— //
         const orderOf = (p) => {
           const id = p && p.id ? p.id() : null;
           if (!id) return null;
@@ -203,17 +233,20 @@ function updateReorderedCache(postStream) {
   }
 
   function finish(arr) {
-    reorderedPostsCache = arr;
+    reorderedPostsCache = arr; // 允许为 null：上层会回退原数组
     isReordering = false;
-    setTimeout(() => m.redraw(), 0);
+    // 下一帧重绘，确保 DOM/锚点稳定
+    requestAnimationFrame(() => m.redraw());
   }
 }
 
 function padToOriginalLength(originalPosts, threadedPosts) {
-  if (!Array.isArray(threadedPosts) || threadedPosts.length === 0) return originalPosts;
-  const result = [...threadedPosts];
-  const need = Math.max(0, originalPosts.length - threadedPosts.length);
-  for (let i = 0; i < need; i++) result.push(null); // 只补 null
+  // 强保证：绝不返回 undefined，仅允许 Post 或 null
+  const result = Array.isArray(threadedPosts) ? threadedPosts.slice() : [];
+  for (let i = 0; i < result.length; i++) result[i] = result[i] ?? null;
+
+  const need = Math.max(0, originalPosts.length - result.length);
+  for (let i = 0; i < need; i++) result.push(null);
   return result;
 }
 
@@ -242,19 +275,27 @@ function resetState(discussionId) {
   lastPostCount = 0;
   suspendThreading = false;
   rebuildPending = false;
+  isUserScrolling = false;
+  if (rebuildTimer) { clearTimeout(rebuildTimer); rebuildTimer = null; }
+  if (scrollIdleTimer) { clearTimeout(scrollIdleTimer); scrollIdleTimer = null; }
   clearThreadDepthCache();
 }
 
 // Debug（可选）
 export function getThreadedPostsCache() { return reorderedPostsCache; }
-export function forceRebuildCache(ps) { reorderedPostsCache = null; clearThreadDepthCache(); scheduleRebuild(ps); }
+export function forceRebuildCache(ps) {
+  reorderedPostsCache = null;
+  clearThreadDepthCache();
+  scheduleRebuild(ps);
+}
 export function isThreadingActive() { return !!(reorderedPostsCache && originalPostsMethod); }
 export function getThreadingStats() {
   return {
     hasCachedPosts: !!reorderedPostsCache,
     cachedPostCount: reorderedPostsCache ? reorderedPostsCache.filter(Boolean).length : 0,
-    isReordering, lastPostCount, suspendThreading, rebuildPending, discussionId: currentDiscussionId,
+    isReordering, lastPostCount,
+    suspendThreading, rebuildPending, isUserScrolling,
+    discussionId: currentDiscussionId,
     hasOriginalMethod: !!originalPostsMethod,
   };
 }
-
