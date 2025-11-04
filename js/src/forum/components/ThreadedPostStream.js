@@ -1,4 +1,3 @@
-// js/src/forum/components/ThreadedPostStream.js
 import app from 'flarum/forum/app';
 import { extend, override } from 'flarum/common/extend';
 import PostStream from 'flarum/forum/components/PostStream';
@@ -7,133 +6,67 @@ import PostStreamState from 'flarum/forum/states/PostStreamState';
 import { createThreadedPosts } from '../utils/ThreadTree';
 import { clearThreadDepthCache } from '../utils/ThreadDepth';
 import { loadMissingParentPosts, loadMinimalChildren } from '../utils/PostLoader';
-import { getOrderIndex, prefetchThreadOrder } from '../utils/ThreadOrderPrefetch';
+import { prefetchThreadOrder, getOrderIndex } from '../utils/ThreadOrderPrefetch';
 
-// ---------- 全局状态 ----------
+// —— 全局状态 —— //
 let isReordering = false;
 let reorderedPostsCache = null;
-let lastPostCount = 0;
 let originalPostsMethod = null;
+let lastPostCount = 0;
 let currentDiscussionId = null;
-let threadedOrder = null;                 // Map<postId, order>
-let enableMinimalChildLoading = true;
 
-// 竞态/滚动防抖
-let suspendCount = 0;                     // 并发加载挂起计数
-let scrolling = false;
-let scrollCooldownTimer = null;
-const SCROLL_COOLDOWN_MS = 120;
+// 分页期间暂停线程化（让 anchorScroll 拿到稳定锚点）
+let suspendThreading = false;
+let rebuildPending = false;
 
-let rebuildTimer = null;
-let rafRedrawScheduled = false;
-
-function isSuspended() {
-  return suspendCount > 0 || scrolling;
-}
-function beginSuspend() { suspendCount++; }
-function endSuspend()   { suspendCount = Math.max(0, suspendCount - 1); }
-
-// 可传入 PostStream；缺省则只清缓存并触发重绘，让 posts() 在下一帧重建
-function scheduleRebuild(psMaybe) {
-  clearTimeout(rebuildTimer);
-  rebuildTimer = setTimeout(() => {
-    if (isSuspended()) {
-      scheduleRebuild(psMaybe);
-      return;
-    }
-    if (psMaybe) {
-      // 直接强制重建
-      forceRebuildCache(psMaybe);
-    } else {
-      // 清缓存，下一次 posts() 自动重建
-      reorderedPostsCache = null;
-      threadedOrder = null;
-      clearThreadDepthCache();
-    }
-    if (!rafRedrawScheduled) {
-      rafRedrawScheduled = true;
-      (window.requestAnimationFrame || setTimeout)(() => {
-        rafRedrawScheduled = false;
-        try { m.redraw(); } catch (e) {}
-      }, 16);
-    }
-  }, 120);
-}
+// 轻量补充：补父 / 少量子
+const enableMinimalChildLoading = true;
 
 export function initThreadedPostStream() {
-  extend(PostStream.prototype, 'oninit', function () {
-    const did = this.stream.discussion.id();
-    if (currentDiscussionId !== did) resetState(did);
-    if (!originalPostsMethod) originalPostsMethod = this.stream.posts;
-
-    // 预取顺序（极轻）
-    prefetchThreadOrder(did);
-
-    // 接管 posts()
-    this.stream.posts = () => {
-      if (reorderedPostsCache) return reorderedPostsCache;
-      const original = originalPostsMethod.call(this.stream);
-      if (!isReordering && original && original.filter(Boolean).length > 0) {
-        updateReorderedCache(this);
-      }
-      return original;
-    };
-
-    const cur = originalPostsMethod.call(this.stream) || [];
-    lastPostCount = cur.filter(Boolean).length;
-    if (lastPostCount > 0) updateReorderedCache(this);
-  });
-
-  // 滚动冷却：滚动中不做重排，避免锚点计算被打断
-  extend(PostStream.prototype, 'onscroll', function () {
-    scrolling = true;
-    clearTimeout(scrollCooldownTimer);
-    scrollCooldownTimer = setTimeout(() => { scrolling = false; }, SCROLL_COOLDOWN_MS);
-  });
-
-  // 翻页：并发挂起，完成后再调度重建
+  // 分页开始/结束：暂停 → 结束后如有标记再补一次重排
   override(PostStreamState.prototype, '_loadPrevious', function (original, ...args) {
-    beginSuspend();
+    suspendThreading = true;
     const p = original(...args);
     return Promise.resolve(p).finally(() => {
-      endSuspend();
-      const ps = this.discussion && this.discussion.postStream;
-      scheduleRebuild(ps); // 没有 ps 也没关系，内部会触发下一帧重建
+      suspendThreading = false;
+      if (rebuildPending) {
+        rebuildPending = false;
+        const ps = this.discussion && this.discussion.postStream ? this.discussion.postStream : null;
+        if (ps) scheduleRebuild(ps);
+      }
     });
   });
 
   override(PostStreamState.prototype, '_loadNext', function (original, ...args) {
-    beginSuspend();
+    suspendThreading = true;
     const p = original(...args);
     return Promise.resolve(p).finally(() => {
-      endSuspend();
-      const ps = this.discussion && this.discussion.postStream;
-      scheduleRebuild(ps);
+      suspendThreading = false;
+      if (rebuildPending) {
+        rebuildPending = false;
+        const ps = this.discussion && this.discussion.postStream ? this.discussion.postStream : null;
+        if (ps) scheduleRebuild(ps);
+      }
     });
   });
 
-  // 可见区稳定排序：优先 threads-order；其次已构建的 threadedOrder；无信息则保持原相对次序
+  // ✅ 新增：在“可见列表”阶段就按预取顺序做稳定排序，消除闪烁
   extend(PostStreamState.prototype, 'visiblePosts', function (result) {
-    if (isSuspended()) return;
     if (!Array.isArray(result) || result.length <= 1) return;
 
+    // 当前讨论 id
     const did =
       (this.discussion && typeof this.discussion.id === 'function' && this.discussion.id()) ||
-      (this.discussion && this.discussion.id) || null;
+      (this.discussion && this.discussion.id) ||
+      null;
 
-    const indexOf = new Map();
-    result.forEach((p, i) => { if (p && typeof p.id === 'function') indexOf.set(p.id(), i); });
-
+    // 就地稳定排序：1) 预取顺序；2)（若无）已计算缓存顺序；3) 否则保持原样
     result.sort((a, b) => {
-      const aid = a && typeof a.id === 'function' ? a.id() : null;
-      const bid = b && typeof b.id === 'function' ? b.id() : null;
+      const aid = a && a.id ? a.id() : null;
+      const bid = b && b.id ? b.id() : null;
+      if (!aid || !bid) return 0;
 
-      // 无效项（null/无 id）始终靠后，防止 render 读 null.tag
-      if (aid == null && bid == null) return 0;
-      if (aid == null) return 1;
-      if (bid == null) return -1;
-
-      // 1) 预取顺序
+      // 1) 预取顺序：/threads-order
       const ao = getOrderIndex(did, aid);
       const bo = getOrderIndex(did, bid);
       if (ao != null || bo != null) {
@@ -142,146 +75,186 @@ export function initThreadedPostStream() {
         if (ao !== bo) return ao - bo;
       }
 
-      // 2) 已构建线程顺序
-      const toA = threadedOrder && threadedOrder.get(aid);
-      const toB = threadedOrder && threadedOrder.get(bid);
-      if (toA != null || toB != null) {
-        if (toA == null) return 1;
-        if (toB == null) return -1;
-        if (toA !== toB) return toA - toB;
-      }
-
-      // 3) 稳定回退：保持原相对次序
-      return (indexOf.get(aid) ?? 0) - (indexOf.get(bid) ?? 0);
+      // 2) 若上一步都没有，就尽量把已有帖子（非 null）排在前面（防御性）
+      return 0;
     });
   });
 
-  // 数据变化 -> 调度重建（不立即打断滚动/锚点）
+  // 绑定 PostStream 生命周期
+  extend(PostStream.prototype, 'oninit', function () {
+    const did = this.stream && this.stream.discussion && this.stream.discussion.id();
+    if (currentDiscussionId !== did) resetState(did);
+
+    if (did) prefetchThreadOrder(did);      // 首帧预取（极小开销）
+
+    if (!originalPostsMethod) originalPostsMethod = this.stream.posts;
+
+    // 覆盖 posts()：分页中返回原生；平时优先返回缓存
+    this.stream.posts = () => {
+      if (suspendThreading) {
+        return originalPostsMethod.call(this.stream) || [];
+      }
+      if (reorderedPostsCache) return reorderedPostsCache;
+
+      const original = originalPostsMethod.call(this.stream) || [];
+      if (!isReordering && original.filter(Boolean).length > 0) {
+        scheduleRebuild(this);              // 异步，不阻断首帧
+      }
+      return original;
+    };
+
+    const cur = originalPostsMethod.call(this.stream) || [];
+    lastPostCount = cur.filter(Boolean).length;
+
+    if (lastPostCount > 0 && !suspendThreading) scheduleRebuild(this);
+  });
+
+  extend(PostStream.prototype, 'oncreate', function () {
+    clearThreadDepthCache();
+  });
+
+  // 帖子数变化：分页中仅打标记；结束后补排；非分页立即重排
   extend(PostStream.prototype, 'onupdate', function () {
     if (!originalPostsMethod) return;
     const current = originalPostsMethod.call(this.stream) || [];
     const count = current.filter(Boolean).length;
+
     if (count !== lastPostCount) {
       lastPostCount = count;
       reorderedPostsCache = null;
-      threadedOrder = null;
       clearThreadDepthCache();
-      scheduleRebuild(this);
+
+      if (suspendThreading) {
+        rebuildPending = true;
+      } else {
+        scheduleRebuild(this);
+      }
     }
   });
 }
 
-// ---------- 重建缓存 ----------
+// ========== 重排主流程 ========== //
+
+function scheduleRebuild(postStream) {
+  setTimeout(() => updateReorderedCache(postStream), 0);
+}
+
 function updateReorderedCache(postStream) {
   if (isReordering) return;
+  if (suspendThreading) {
+    rebuildPending = true;
+    return;
+  }
   isReordering = true;
-  beginSuspend();
-
-  const finish = (arr) => {
-    reorderedPostsCache = arr;
-    isReordering = false;
-    endSuspend();
-    (window.requestAnimationFrame || setTimeout)(() => { try { m.redraw(); } catch (e) {} }, 16);
-  };
 
   try {
     if (!originalPostsMethod) return finish(null);
 
     const originalPosts = originalPostsMethod.call(postStream.stream) || [];
-    const validPosts = originalPosts.filter(Boolean);
-    if (validPosts.length === 0) return finish(null);
+    const valid = originalPosts.filter(Boolean);
+    if (valid.length === 0) return finish(null);
 
-    ensureParentsLoaded(postStream, validPosts)
+    ensureParentsLoaded(postStream, valid)
       .then((postsWithParents) =>
         enableMinimalChildLoading
           ? ensureMinimalChildren(postStream, postsWithParents)
           : postsWithParents
       )
       .then((postsReady) => {
-        const threaded = createThreadedPosts(postsReady);
-        const threadedArray = createThreadedPostsArray(originalPosts, threaded);
+        const did = postStream.stream && postStream.stream.discussion && postStream.stream.discussion.id();
 
-        threadedOrder = new Map();
-        let idx = 0;
-        threadedArray.forEach((p) => { if (p && p.id) threadedOrder.set(p.id(), idx++); });
+        // 优先按 /threads-order 预取顺序排序
+        const orderOf = (p) => {
+          const id = p && p.id ? p.id() : null;
+          if (!id) return null;
+          const idx = getOrderIndex(did, id);
+          return Number.isInteger(idx) ? idx : null;
+        };
 
+        let sorted;
+        const hasAnyOrder = postsReady.some((p) => orderOf(p) !== null);
+
+        if (hasAnyOrder) {
+          sorted = postsReady.slice().sort((a, b) => {
+            const ao = orderOf(a);
+            const bo = orderOf(b);
+            if (ao == null && bo == null) return 0;
+            if (ao == null) return 1;
+            if (bo == null) return -1;
+            return ao - bo;
+          });
+        } else {
+          // 退回本地“父后跟子”的轻量线程化
+          sorted = createThreadedPosts(postsReady);
+        }
+
+        const threadedArray = padToOriginalLength(originalPosts, sorted);
         finish(threadedArray);
       })
       .catch((err) => {
-        console.warn('[Threadify] load parent/child failed, fallback threading:', err);
-        const threaded = createThreadedPosts(validPosts);
-        const threadedArray = createThreadedPostsArray(originalPosts, threaded);
-
-        threadedOrder = new Map();
-        let idx = 0;
-        threadedArray.forEach((p) => { if (p && p.id) threadedOrder.set(p.id(), idx++); });
-
+        console.warn('[Threadify] reorder fallback due to error:', err);
+        const fallback = createThreadedPosts(valid);
+        const threadedArray = padToOriginalLength(originalPosts, fallback);
         finish(threadedArray);
       });
   } catch (e) {
     console.error('[Threadify] Cache update failed:', e);
     finish(null);
   }
+
+  function finish(arr) {
+    reorderedPostsCache = arr;
+    isReordering = false;
+    setTimeout(() => m.redraw(), 0);
+  }
 }
 
-function createThreadedPostsArray(originalPosts, threadedPosts) {
+function padToOriginalLength(originalPosts, threadedPosts) {
   if (!Array.isArray(threadedPosts) || threadedPosts.length === 0) return originalPosts;
   const result = [...threadedPosts];
-  const nullsNeeded = Math.max(0, originalPosts.length - threadedPosts.length);
-  for (let i = 0; i < nullsNeeded; i++) result.push(null);
+  const need = Math.max(0, originalPosts.length - threadedPosts.length);
+  for (let i = 0; i < need; i++) result.push(null); // 只补 null
   return result;
 }
 
+// —— 按需补父/少量子（失败即原样返回） —— //
 function ensureParentsLoaded(postStream, posts) {
   if (typeof loadMissingParentPosts === 'function') {
     const ctx = postStream.discussion ? postStream : { discussion: postStream.stream.discussion };
-    return loadMissingParentPosts(ctx, posts).catch(() => fallbackLoadParents(posts));
+    return loadMissingParentPosts(ctx, posts).catch(() => Promise.resolve(posts));
   }
-  return fallbackLoadParents(posts);
+  return Promise.resolve(posts);
 }
 function ensureMinimalChildren(postStream, posts) {
   if (typeof loadMinimalChildren === 'function') {
     const ctx = postStream.discussion ? postStream : { discussion: postStream.stream.discussion };
-    return loadMinimalChildren(ctx, posts).catch(() => posts);
+    return loadMinimalChildren(ctx, posts).catch(() => Promise.resolve(posts));
   }
   return Promise.resolve(posts);
 }
-function fallbackLoadParents(currentPosts) {
-  const byId = new Map(currentPosts.filter(Boolean).map((p) => [String(p.id()), p]));
-  const missing = [];
-  currentPosts.forEach((p) => {
-    const pid = p && p.attribute ? p.attribute('parent_id') : null;
-    if (pid && !byId.has(String(pid))) missing.push(String(pid));
-  });
-  if (missing.length === 0) return Promise.resolve(currentPosts);
 
-  return app.store
-    .find('posts', { filter: { id: missing.join(',') } })
-    .then((loaded) => fallbackLoadParents([...currentPosts, ...loaded]))
-    .catch(() => currentPosts);
+// —— 切讨论时复位 —— //
+function resetState(discussionId) {
+  currentDiscussionId = discussionId;
+  isReordering = false;
+  reorderedPostsCache = null;
+  originalPostsMethod = null;
+  lastPostCount = 0;
+  suspendThreading = false;
+  rebuildPending = false;
+  clearThreadDepthCache();
 }
 
-// ---------- 导出 ----------
+// Debug（可选）
 export function getThreadedPostsCache() { return reorderedPostsCache; }
-export function forceRebuildCache(postStream) {
-  reorderedPostsCache = null; threadedOrder = null; clearThreadDepthCache(); updateReorderedCache(postStream);
-}
+export function forceRebuildCache(ps) { reorderedPostsCache = null; clearThreadDepthCache(); scheduleRebuild(ps); }
 export function isThreadingActive() { return !!(reorderedPostsCache && originalPostsMethod); }
 export function getThreadingStats() {
   return {
     hasCachedPosts: !!reorderedPostsCache,
     cachedPostCount: reorderedPostsCache ? reorderedPostsCache.filter(Boolean).length : 0,
-    isReordering, lastPostCount, hasOriginalMethod: !!originalPostsMethod, discussionId: currentDiscussionId,
+    isReordering, lastPostCount, suspendThreading, rebuildPending, discussionId: currentDiscussionId,
+    hasOriginalMethod: !!originalPostsMethod,
   };
-}
-
-function resetState(discussionId) {
-  currentDiscussionId = discussionId;
-  isReordering = false;
-  reorderedPostsCache = null;
-  lastPostCount = 0;
-  originalPostsMethod = null;
-  threadedOrder = null;
-  clearThreadDepthCache();
 }
 
