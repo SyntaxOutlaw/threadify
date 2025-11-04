@@ -1,198 +1,333 @@
 /**
- * Simplified Threaded PostStream Component
- * 
- * This is a complete replacement for the complex ThreadedPostStream logic.
- * Instead of dynamic tree building and complex caching, this simply calls
- * the threads API to get pre-computed thread structures.
- * 
- * Benefits:
- * - Single API call instead of multiple post loading calls  
- * - No complex caching or state management
- * - No dynamic tree building on frontend
- * - Much more reliable and performant
- * - Easier to understand and maintain
- * 
- * @author Threadify Extension
+ * Threaded PostStream Component (stable + prefetch + ancestor & children completion)
+ *
+ * 特性：
+ * - 首帧不阻断：首次渲染仍走 Flarum 原序；
+ * - 预取全局顺序：/threads-order；
+ * - 依据预取映射「向上补齐缺失祖先（最多 N 层）」再「按需补齐子帖（每父帖最多 M 条，整体上限 K）」；
+ * - 不改写 visiblePosts（避免 anchorScroll 报错）；
+ * - 仅当 PostStream 空闲时重排；
+ * - 预取不可用则回退到“补父 + 少量子 + 简易线程化（ThreadTree）”。
  */
 
+import app from 'flarum/forum/app';
 import { extend } from 'flarum/common/extend';
 import PostStream from 'flarum/forum/components/PostStream';
-import { loadDiscussionThreads, shouldUseThreadsApi } from '../utils/ThreadsApi';
 
-// Simple state management - no complex caching needed
-let threadsLoaded = false;
-let threadedPosts = null;
+import { createThreadedPosts } from '../utils/ThreadTree';
+import { clearThreadDepthCache } from '../utils/ThreadDepth';
+import { loadMissingParentPosts, loadMinimalChildren } from '../utils/PostLoader';
+import {
+  prefetchThreadOrder,
+  getOrderIndex,
+  getParentPrefetched,
+  isPrefetched,
+  collectChildrenIdsForParents,
+} from '../utils/ThreadOrderPrefetch';
+
+// ---- 配置 -----------------------------------------------------------
+const MAX_ANCESTOR_STEPS = 3;        // 追溯祖先层数上限
+const CHILD_LIMIT_PER_PARENT = 8;    // 每个父帖最多补多少子帖
+const CHILD_MAX_TOTAL = 40;          // 本次最多补多少子帖
+const ENABLE_MINIMAL_CHILD_LOADING = true; // 预取缺失时的后备策略
+
+// ---- 模块级状态 ----------------------------------------------------
+let isReordering = false;
+let reorderedPostsCache = null;
+let lastPostCount = 0;
+let originalPostsMethod = null;
 let currentDiscussionId = null;
-let lastPostCount = 0; // Track last post count to detect updates
 
-/**
- * Initialize the simplified threaded PostStream
- * 
- * This replaces the complex threading logic with a simple API-based approach.
- */
-export function initSimplifiedThreadedPostStream() {
-  
-  // Override posts method when PostStream initializes
-  extend(PostStream.prototype, 'oninit', function() {
-    console.log('[Threadify] Initializing simplified threaded PostStream');
-    
-    // Get discussion ID
-    const discussionId = this.stream.discussion.id();
-    
-    // Reset state if discussion changed
-    if (currentDiscussionId !== discussionId) {
-      console.log('[Threadify] Discussion changed, resetting thread state');
-      threadsLoaded = false;
-      threadedPosts = null;
-      currentDiscussionId = discussionId;
-    }
-    
-    // Load threads if needed
-    if (shouldUseThreadsApi(this.stream.discussion) && !threadsLoaded) {
-      console.log('[Threadify] Loading threaded posts from API');
-      loadThreadedPosts(this);
-    }
-  });
-  
-  // Handle discussion changes
-  extend(PostStream.prototype, 'oncreate', function() {
-    const discussionId = this.stream.discussion.id();
-    
-    // Reset if discussion changed
-    if (currentDiscussionId !== discussionId) {
-      console.log('[Threadify] Discussion changed in oncreate, resetting');
-      threadsLoaded = false;
-      threadedPosts = null;
-      currentDiscussionId = discussionId;
-      
-      // Load threads for new discussion
-      if (shouldUseThreadsApi(this.stream.discussion)) {
-        loadThreadedPosts(this);
-      }
-    }
-  });
-
-  // Handle post stream updates to reload threads when new posts are added
-  extend(PostStream.prototype, 'onupdate', function() {
-    // Only check for updates if we're using threads API
-    if (!shouldUseThreadsApi(this.stream.discussion)) {
-      return;
-    }
-    
-    // Get current post count from the stream
-    const currentPosts = this.stream.posts();
-    const currentPostCount = currentPosts ? currentPosts.filter(p => p).length : 0;
-    
-    // If post count changed, reload threads
-    if (currentPostCount !== lastPostCount) {
-      console.log(`[Threadify] Post count changed: ${lastPostCount} -> ${currentPostCount}, reloading threads`);
-      lastPostCount = currentPostCount;
-      
-      // Reset and reload
-      threadsLoaded = false;
-      threadedPosts = null;
-      loadThreadedPosts(this);
-    }
-  });
-
-  // Clean up when component is destroyed
-  extend(PostStream.prototype, 'onremove', function() {
-    console.log('[Threadify] PostStream being removed, cleaning up');
-    // Don't reset state here as it might be needed for other instances
-  });
-
-  // Override the posts getter to return threaded posts when available
-  extend(PostStream.prototype, 'posts', function(original) {
-    // If we have threaded posts loaded for this discussion, return them
-    if (threadsLoaded && threadedPosts && currentDiscussionId === this.stream.discussion.id()) {
-      console.log(`[Threadify] Returning cached threaded posts (${threadedPosts.length} posts)`);
-      return threadedPosts;
-    }
-    
-    // Otherwise return original posts
-    const originalPosts = original();
-    console.log(`[Threadify] Returning original posts (${originalPosts ? originalPosts.length : 0} posts)`);
-    return originalPosts;
-  });
+// ---- 工具：判定流是否忙碌（翻页/锚点附近加载等） --------------------
+function streamBusy(state) {
+  if (!state) return false;
+  return !!(
+    state.loading ||
+    state.loadingPrevious ||
+    state.loadingNext ||
+    state.loadingNear ||
+    state._loadingPrevious ||
+    state._loadingNext
+  );
 }
 
-/**
- * Load threaded posts from the API
- * 
- * @param {PostStream} postStream - The PostStream instance
- */
-function loadThreadedPosts(postStream) {
-  const discussionId = postStream.stream.discussion.id();
-  
-  console.log(`[Threadify] Loading threads for discussion ${discussionId}`);
-  
-  loadDiscussionThreads(discussionId)
-    .then(posts => {
-      // Only update if we're still on the same discussion
-      if (currentDiscussionId === discussionId) {
-        threadedPosts = posts;
-        threadsLoaded = true;
-        
-        // Update post count tracking
-        lastPostCount = posts ? posts.filter(p => p).length : 0;
-        
-        console.log(`[Threadify] Successfully loaded ${threadedPosts.length} threaded posts`);
-        console.log('[Threadify] Sample post metadata:', threadedPosts[0] ? {
-          id: threadedPosts[0].id(),
-          depth: threadedPosts[0]._threadDepth,
-          hasUser: !!threadedPosts[0].user,
-          userFunction: typeof threadedPosts[0].user
-        } : 'No posts');
-        
-        m.redraw();
+// ===================================================================
+// 初始化
+// ===================================================================
+export function initThreadedPostStream() {
+  extend(PostStream.prototype, 'oninit', function () {
+    const did = this.stream.discussion && this.stream.discussion.id && this.stream.discussion.id();
+    if (currentDiscussionId !== did) resetState(did);
+
+    if (!originalPostsMethod) originalPostsMethod = this.stream.posts;
+
+    if (did) prefetchThreadOrder(did);
+
+    this.stream.posts = () => {
+      if (reorderedPostsCache) return reorderedPostsCache;
+
+      const original = originalPostsMethod.call(this.stream) || [];
+      if (!isReordering && original.filter(Boolean).length > 0) {
+        buildCacheWithPrefetch(this);
+      }
+      return original;
+    };
+
+    const cur = originalPostsMethod.call(this.stream) || [];
+    lastPostCount = cur.filter(Boolean).length;
+    if (lastPostCount > 0) buildCacheWithPrefetch(this);
+  });
+
+  extend(PostStream.prototype, 'onupdate', function () {
+    if (!originalPostsMethod) return;
+
+    const current = originalPostsMethod.call(this.stream) || [];
+    const count = current.filter(Boolean).length;
+
+    if (count !== lastPostCount) {
+      lastPostCount = count;
+      reorderedPostsCache = null;
+      clearThreadDepthCache();
+
+      if (!streamBusy(this.stream)) {
+        buildCacheWithPrefetch(this);
       } else {
-        console.log('[Threadify] Discussion changed while loading, ignoring results');
+        setTimeout(() => {
+          if (!streamBusy(this.stream)) buildCacheWithPrefetch(this);
+        }, 60);
       }
-    })
-    .catch(error => {
-      console.error('[Threadify] Failed to load threaded posts:', error);
-      
-      // Mark as loaded anyway to prevent infinite retries
-      threadsLoaded = true;
-      
-      // Keep using original posts as fallback
-      threadedPosts = null;
-    });
+    }
+  });
+
+  // 预取就绪时尝试重建（避免同帧与 anchorScroll 打架）
+  window.addEventListener('threadify:orderReady', (ev) => {
+    const did = ev?.detail;
+    if (!did || did !== currentDiscussionId) return;
+    setTimeout(() => {
+      try {
+        if (!isReordering && !reorderedPostsCache) buildCacheWithPrefetch(this);
+      } catch {}
+    }, 0);
+  });
 }
 
-/**
- * Get current threading state (for debugging)
- * 
- * @returns {Object} - Current state information
- */
-export function getThreadingState() {
+// ===================================================================
+// 核心：预取顺序 + 祖先补齐 + 子帖补齐 -> 稳定重排
+// ===================================================================
+function buildCacheWithPrefetch(postStream) {
+  if (isReordering) return;
+  isReordering = true;
+
+  const finish = (arr) => {
+    reorderedPostsCache = arr;
+    isReordering = false;
+    setTimeout(() => { try { m.redraw(); } catch {} }, 0);
+  };
+
+  try {
+    if (!originalPostsMethod) return finish(null);
+
+    const originalPosts = originalPostsMethod.call(postStream.stream) || [];
+    const validPosts = originalPosts.filter(Boolean);
+    if (validPosts.length === 0) return finish(null);
+
+    const did = postStream.stream.discussion && postStream.stream.discussion.id && postStream.stream.discussion.id();
+
+    const build = () =>
+      ensureAncestorsByPrefetch(did, validPosts)
+        .then((withAncestors) => ensureChildrenByPrefetch(did, withAncestors))
+        .then((ready) => {
+          const sorted = sortByPrefetchOrder(did, ready);
+          if (sorted && sorted.length) {
+            const threadedArray = padNullsToLength(sorted, originalPosts.length);
+            finish(threadedArray);
+            return;
+          }
+
+          // —— 预取不可用或无映射命中：回退 —— //
+          ensureParentsLoaded(postStream, validPosts)
+            .then((postsWithParents) =>
+              ENABLE_MINIMAL_CHILD_LOADING
+                ? ensureMinimalChildren(postStream, postsWithParents)
+                : postsWithParents
+            )
+            .then((postsReady) => {
+              const threaded = createThreadedPosts(postsReady);
+              const threadedArray = padNullsToLength(threaded, originalPosts.length);
+              finish(threadedArray);
+            })
+            .catch((err) => {
+              console.warn('[Threadify] prefetch & fallback threading both failed:', err);
+              finish(null);
+            });
+        });
+
+    if (did && !isPrefetched(did)) {
+      prefetchThreadOrder(did).finally(build);
+    } else {
+      build();
+    }
+  } catch (e) {
+    console.error('[Threadify] buildCacheWithPrefetch failed:', e);
+    isReordering = false;
+  }
+}
+
+// —— 祖先补齐（最多 MAX_ANCESTOR_STEPS 层） ——
+function ensureAncestorsByPrefetch(discussionId, posts) {
+  return new Promise((resolve) => {
+    if (!discussionId || !Array.isArray(posts) || posts.length === 0) return resolve(posts);
+
+    const loaded = new Set(posts.map((p) => String(p.id && p.id())));
+    const toFetch = new Set();
+
+    for (const p of posts) {
+      let step = 0;
+      let cur = p && p.id && Number(p.id());
+      while (cur && step < MAX_ANCESTOR_STEPS) {
+        const parent = getParentPrefetched(discussionId, cur);
+        if (!parent) break;
+        if (!loaded.has(String(parent))) toFetch.add(String(parent));
+        cur = parent;
+        step++;
+      }
+    }
+
+    if (toFetch.size === 0) return resolve(posts);
+
+    app.store
+      .find('posts', { filter: { id: Array.from(toFetch).join(',') } })
+      .then((loadedParents) => {
+        const map = new Map(posts.map((p) => [String(p.id && p.id()), p]));
+        for (const lp of loadedParents || []) {
+          const id = String(lp.id && lp.id());
+          if (!map.has(id)) map.set(id, lp);
+        }
+        resolve(Array.from(map.values()));
+      })
+      .catch(() => resolve(posts));
+  });
+}
+
+// —— 子帖补齐（依据预取映射为当前已加载的父帖拉取若干“远在后面的子帖”） ——
+function ensureChildrenByPrefetch(discussionId, posts) {
+  return new Promise((resolve) => {
+    if (!discussionId || !Array.isArray(posts) || posts.length === 0) return resolve(posts);
+
+    const loadedIds = new Set(posts.map((p) => String(p.id && p.id())));
+    const parentIds = new Set(posts.map((p) => p && p.id && Number(p.id())));
+
+    const childrenIds = collectChildrenIdsForParents(
+      discussionId,
+      parentIds,
+      CHILD_LIMIT_PER_PARENT,
+      'latest',
+      CHILD_MAX_TOTAL
+    );
+
+    // 过滤掉已加载的
+    const toFetch = childrenIds.filter((id) => !loadedIds.has(String(id)));
+    if (toFetch.length === 0) return resolve(posts);
+
+    app.store
+      .find('posts', { filter: { id: toFetch.join(',') } })
+      .then((loadedChildren) => resolve([...posts, ...(loadedChildren || [])]))
+      .catch(() => resolve(posts));
+  });
+}
+
+// —— 用预取顺序排序（只重排“已加载的帖子”） ——
+function sortByPrefetchOrder(discussionId, posts) {
+  if (!discussionId || !Array.isArray(posts) || posts.length === 0) return null;
+  const hit = posts.some((p) => getOrderIndex(discussionId, p.id && p.id()) != null);
+  if (!hit) return null;
+
+  const list = posts.slice();
+  list.sort((a, b) => {
+    const aid = a && a.id && a.id();
+    const bid = b && b.id && b.id();
+    const ao = getOrderIndex(discussionId, aid);
+    const bo = getOrderIndex(discussionId, bid);
+
+    if (ao != null || bo != null) {
+      if (ao == null && bo == null) return 0;
+      if (ao == null) return 1;
+      if (bo == null) return -1;
+      if (ao !== bo) return ao - bo;
+    }
+    return 0; // 稳定排序：都没有映射则保持相对顺序
+  });
+
+  return list;
+}
+
+// —— 维持原数组长度（分页位）——不足用 null 填充 ——
+function padNullsToLength(arr, targetLen) {
+  const result = Array.isArray(arr) ? arr.slice() : [];
+  const need = Math.max(0, targetLen - result.length);
+  for (let i = 0; i < need; i++) result.push(null);
+  return result;
+}
+
+// ---- 后备加载（无预取时） ------------------------------------------
+function ensureParentsLoaded(postStream, posts) {
+  if (typeof loadMissingParentPosts === 'function') {
+    const ctx = postStream.discussion ? postStream : { discussion: postStream.stream.discussion };
+    return loadMissingParentPosts(ctx, posts).catch(() => fallbackLoadParents(posts));
+  }
+  return fallbackLoadParents(posts);
+}
+
+function ensureMinimalChildren(postStream, posts) {
+  if (typeof loadMinimalChildren === 'function') {
+    const ctx = postStream.discussion ? postStream : { discussion: postStream.stream.discussion };
+    return loadMinimalChildren(ctx, posts).catch(() => posts);
+  }
+  return Promise.resolve(posts);
+}
+
+function fallbackLoadParents(currentPosts) {
+  const byId = new Map(currentPosts.filter(Boolean).map((p) => [String(p.id()), p]));
+  const missing = [];
+  currentPosts.forEach((p) => {
+    const pid = p && p.attribute ? p.attribute('parent_id') : null;
+    if (pid && !byId.has(String(pid))) missing.push(String(pid));
+  });
+  if (missing.length === 0) return Promise.resolve(currentPosts);
+
+  return app.store
+    .find('posts', { filter: { id: missing.join(',') } })
+    .then((loaded) => fallbackLoadParents([...currentPosts, ...loaded]))
+    .catch(() => currentPosts);
+}
+
+// ---- 导出工具 ------------------------------------------------------
+export function getThreadedPostsCache() { return reorderedPostsCache; }
+
+export function forceRebuildCache(postStream) {
+  reorderedPostsCache = null;
+  clearThreadDepthCache();
+  if (!streamBusy(postStream && postStream.stream)) buildCacheWithPrefetch(postStream);
+}
+
+export function isThreadingActive() { return !!(reorderedPostsCache && originalPostsMethod); }
+
+export function getThreadingStats() {
   return {
-    threadsLoaded,
-    hasThreadedPosts: !!threadedPosts,
-    threadedPostCount: threadedPosts ? threadedPosts.length : 0,
-    currentDiscussionId
+    hasCachedPosts: !!reorderedPostsCache,
+    cachedPostCount: reorderedPostsCache ? reorderedPostsCache.filter(Boolean).length : 0,
+    isReordering,
+    lastPostCount,
+    hasOriginalMethod: !!originalPostsMethod,
+    discussionId: currentDiscussionId,
   };
 }
 
-/**
- * Force reload threads for current discussion
- * 
- * Useful for testing or when posts are added/modified
- */
-export function reloadThreads() {
-  console.log('[Threadify] Force reloading threads');
-  threadsLoaded = false;
-  threadedPosts = null;
-  
-  // Trigger a redraw to start the reload process
-  m.redraw();
+function resetState(discussionId) {
+  currentDiscussionId = discussionId;
+  isReordering = false;
+  reorderedPostsCache = null;
+  lastPostCount = 0;
+  originalPostsMethod = null;
+  clearThreadDepthCache();
 }
-
-/**
- * Check if threading is currently active
- * 
- * @returns {boolean} - True if threading is active
- */
-export function isThreadingActive() {
-  return threadsLoaded && !!threadedPosts;
-} 
