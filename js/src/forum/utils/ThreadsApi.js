@@ -1,121 +1,79 @@
 /**
- * Threads API Utilities
- * 
- * Simple API interface for loading threaded post data from the new
- * threadify_threads table. This replaces the complex dynamic threading
- * logic with efficient pre-computed thread structures.
- * 
- * @author Threadify Extension
+ * threads-order API 轻量层
+ * - 负责预取并缓存：Map<postId, { order, depth, parentId }>
+ * - 暴露读取与监听工具
  */
 
-/**
- * Load all threads for a discussion
- * 
- * Makes a single API call to get complete thread structure with all
- * posts in proper threaded order. No complex post loading or tree
- * building needed on the frontend.
- * 
- * @param {number} discussionId - The discussion ID to load threads for
- * @returns {Promise<Object[]>} - Promise resolving to array of thread objects
- */
-export function loadDiscussionThreads(discussionId) {
-  console.log(`[Threadify] Loading threads for discussion ${discussionId}`);
-  
-  // Use Flarum's request method to call our custom API endpoint
-  return app.request({
+const _cache = new Map(); // did -> { ready: Promise<void>, map: Map<number,{order,depth,parentId}> }
+
+export function prefetchThreadsOrder(discussionId) {
+  const did = Number(discussionId);
+  if (!did) return Promise.resolve();
+
+  const hit = _cache.get(did);
+  if (hit && hit.ready) return hit.ready;
+
+  const entry = { ready: null, map: new Map() };
+  _cache.set(did, entry);
+
+  entry.ready = app.request({
     method: 'GET',
-    url: app.forum.attribute('apiUrl') + '/discussions/' + discussionId + '/threads'
-  }).then(response => {
-    console.log(`[Threadify] Loaded ${response.data.length} thread entries`);
-    
-    // Process included data first to populate the store
-    if (response.included) {
-      console.log(`[Threadify] Processing ${response.included.length} included items`);
-      response.included.forEach(item => {
-        console.log(`[Threadify] Including ${item.type}:${item.id}`);
-        app.store.pushObject(item);
+    url: `${app.forum.attribute('apiUrl')}/discussions/${did}/threads-order`,
+  }).then((res) => {
+    const map = new Map();
+    (res.order || []).forEach(({ postId, order, depth, parentPostId }) => {
+      map.set(Number(postId), {
+        order: Number(order),
+        depth: Number.isFinite(depth) ? Number(depth) : 0,
+        parentId: parentPostId ? Number(parentPostId) : null,
       });
-    }
-    
-    // Convert thread data to posts with threading metadata
-    const threadedPosts = response.data.map(threadData => {
-      // Find the post in Flarum's store
-      const postId = threadData.attributes.postId;
-      let post = app.store.getById('posts', postId);
-      
-      if (post) {
-        // Debug: Check if post has user relationship
-        console.log(`[Threadify] Post ${postId} found, user:`, post.user ? post.user() : 'NO USER');
-        
-        // Add threading metadata to the post
-        post._threadDepth = threadData.attributes.depth;
-        post._threadPath = threadData.attributes.threadPath;
-        post._isRoot = threadData.attributes.isRoot;
-        post._childCount = threadData.attributes.childCount;
-        post._descendantCount = threadData.attributes.descendantCount;
-        post._rootPostId = threadData.attributes.rootPostId;
-        post._parentPostId = threadData.attributes.parentPostId;
-        
-        console.log(`[Threadify] Post ${postId} depth: ${post._threadDepth}, path: ${post._threadPath}`);
-      } else {
-        console.warn(`[Threadify] Post ${postId} not found in store`);
-      }
-      
-      return post;
-    }).filter(post => post !== null); // Filter out any null posts
-    
-    console.log(`[Threadify] Processed ${threadedPosts.length} threaded posts`);
-    
-    return threadedPosts;
-  }).catch(error => {
-    console.error('[Threadify] Failed to load discussion threads:', error);
-    
-    // Fallback: return empty array - existing PostStream will handle this gracefully
-    return [];
+    });
+    entry.map = map;
+
+    // 通知前端其它模块（可选）
+    try {
+      window.dispatchEvent(new CustomEvent('threadify:order-ready', { detail: { discussionId: did } }));
+    } catch (e) {}
+  }).catch((e) => {
+    console.warn('[Threadify] threads-order prefetch failed', e);
   });
+
+  return entry.ready;
 }
 
-/**
- * Check if threads API is available for a discussion
- * 
- * @param {Discussion} discussion - The discussion to check
- * @returns {boolean} - True if threads API should be used
- */
-export function shouldUseThreadsApi(discussion) {
-  // For now, always try to use the threads API
-  // In the future, this could be configurable or based on discussion settings
-  return true;
+export function getOrderRecord(discussionId, postId) {
+  const entry = _cache.get(Number(discussionId));
+  if (!entry) return undefined;
+  return entry.map.get(Number(postId));
 }
 
-/**
- * Get thread metadata for a post
- * 
- * Extracts threading information that was added by loadDiscussionThreads
- * 
- * @param {Post} post - The post to get metadata for
- * @returns {Object|null} - Thread metadata or null if not available
- */
+export function getPrefetchedDepth(discussionId, postId) {
+  const rec = getOrderRecord(discussionId, postId);
+  return rec ? rec.depth : undefined;
+}
+
+export function hasOrderFor(discussionId) {
+  const entry = _cache.get(Number(discussionId));
+  return !!(entry && entry.map && entry.map.size);
+}
+
+// 供 SimplifiedThreadDepth 使用：把预取到的元数据回传给“加类名”逻辑
 export function getPostThreadMetadata(post) {
-  if (!post || typeof post._threadDepth === 'undefined') {
-    return null;
-  }
-  
+  if (!post) return null;
+  const discussion = post.discussion && post.discussion();
+  const did = discussion && discussion.id && discussion.id();
+  if (!did) return null;
+
+  const rec = getOrderRecord(did, post.id());
+  if (!rec) return null;
+
+  // 注意：rootPostId/descendantCount 这类聚合值由服务端负责；此处仅返回前端需要的 depth/parent
   return {
-    depth: post._threadDepth,
-    threadPath: post._threadPath,
-    isRoot: post._isRoot,
-    childCount: post._childCount,
-    descendantCount: post._descendantCount,
-    rootPostId: post._rootPostId
+    depth: rec.depth,
+    threadPath: null,
+    isRoot: !rec.parentId,
+    childCount: 0,
+    descendantCount: 0,
+    rootPostId: null,
   };
 }
-
-/**
- * Check if a post has threading metadata
- * 
- * @param {Post} post - The post to check
- * @returns {boolean} - True if post has threading metadata
- */
-export function hasThreadMetadata(post) {
-  return post && typeof post._threadDepth !== 'undefined';
-} 
