@@ -1,57 +1,51 @@
+// Threadify — Inset Accent Bar with site secondary color
+// 只用缩进 + 正文左缘内凹色条（站点副色）；无竖线/短横
+
 @thread-indent-size: 30px;
 
-/* 在 article.Post 上强制缩进；同时兼容 .thread-depth-* 和 .Post--thread-depth-* */
-article.Post.thread-depth-1,
-article.Post.Post--thread-depth-1 { margin-left: (@thread-indent-size * 1) !important; }
-article.Post.thread-depth-2,
-article.Post.Post--thread-depth-2 { margin-left: (@thread-indent-size * 2) !important; }
-article.Post.thread-depth-3,
-article.Post.Post--thread-depth-3 { margin-left: (@thread-indent-size * 3) !important; }
-article.Post.thread-depth-4,
-article.Post.Post--thread-depth-4 { margin-left: (@thread-indent-size * 4) !important; }
-article.Post.thread-depth-5,
-article.Post.Post--thread-depth-5 { margin-left: (@thread-indent-size * 5) !important; }
-article.Post.thread-depth-6,
-article.Post.Post--thread-depth-6 { margin-left: (@thread-indent-size * 6) !important; }
-article.Post.thread-depth-7,
-article.Post.Post--thread-depth-7 { margin-left: (@thread-indent-size * 7) !important; }
-article.Post.thread-depth-8,
-article.Post.Post--thread-depth-8 { margin-left: (@thread-indent-size * 8) !important; }
-article.Post.thread-depth-9,
-article.Post.Post--thread-depth-9 { margin-left: (@thread-indent-size * 9) !important; }
-article.Post.thread-depth-10,
-article.Post.Post--thread-depth-10 { margin-left: (@thread-indent-size * 10) !important; }
+// 颜色来源：优先取主题变量 --secondary-color，其次 --secondary，最后兜底色 #D1B790
+:root {
+  --threadify-accent: var(--secondary-color, var(--secondary, #D1B790));
+}
 
-/* 你当前的“内凹副色条”样式可以保留在 .Post-body 上，互不影响 */
+/* 层级缩进（不改内部布局） */
+.thread-depth-1  { margin-left: (@thread-indent-size * 1); }
+.thread-depth-2  { margin-left: (@thread-indent-size * 2); }
+.thread-depth-3  { margin-left: (@thread-indent-size * 3); }
+.thread-depth-4  { margin-left: (@thread-indent-size * 4); }
+.thread-depth-5  { margin-left: (@thread-indent-size * 5); }
+.thread-depth-6  { margin-left: (@thread-indent-size * 6); }
+.thread-depth-7  { margin-left: (@thread-indent-size * 7); }
+.thread-depth-8  { margin-left: (@thread-indent-size * 8); }
+.thread-depth-9  { margin-left: (@thread-indent-size * 9); }
+.thread-depth-10 { margin-left: (@thread-indent-size * 10); }
+
+/* 正文左缘“内凹色条” = 2px inset 细条（站点副色） */
 .threaded-post .Post-body,
 .Post--threaded .Post-body {
   box-shadow: inset 2px 0 0 var(--threadify-accent);
   transition: box-shadow .2s ease;
-  padding-left: 10px;
+  padding-left: 10px;   // 给细条留一点视觉空间（可按需调小/移除）
 }
 
-/* 移动端缩进（同样命中外层容器） */
+/* 悬停轻微强调（若不需要，删掉即可） */
+.threaded-post:hover .Post-body,
+.Post--threaded:hover .Post-body {
+  box-shadow: inset 4px 0 0 var(--threadify-accent);
+}
+
+/* 移动端仅减小缩进 */
 @media (max-width: 768px) {
-  article.Post.thread-depth-1,
-  article.Post.Post--thread-depth-1,
-  article.Post.thread-depth-2,
-  article.Post.Post--thread-depth-2,
-  article.Post.thread-depth-3,
-  article.Post.Post--thread-depth-3,
-  article.Post.thread-depth-4,
-  article.Post.Post--thread-depth-4,
-  article.Post.thread-depth-5,
-  article.Post.Post--thread-depth-5,
-  article.Post.thread-depth-6,
-  article.Post.Post--thread-depth-6,
-  article.Post.thread-depth-7,
-  article.Post.Post--thread-depth-7,
-  article.Post.thread-depth-8,
-  article.Post.Post--thread-depth-8,
-  article.Post.thread-depth-9,
-  article.Post.Post--thread-depth-9,
-  article.Post.thread-depth-10,
-  article.Post.Post--thread-depth-10 {
+  .thread-depth-1,
+  .thread-depth-2,
+  .thread-depth-3,
+  .thread-depth-4,
+  .thread-depth-5,
+  .thread-depth-6,
+  .thread-depth-7,
+  .thread-depth-8,
+  .thread-depth-9,
+  .thread-depth-10 {
     margin-left: 8px !important;
   }
 }
