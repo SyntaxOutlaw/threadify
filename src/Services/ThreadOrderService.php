@@ -9,46 +9,61 @@ class ThreadOrderService
     public function __construct(protected DB $db) {}
 
     /**
-     * 返回扁平化顺序（父后跟子，兄弟按 created_at 升序）
-     * @return array<int, array{post_id:int, parent_post_id:?int, depth:int}>
+     * 返回给定讨论的扁平化顺序（仅限传入的可见帖子集合）
+     * 父后跟子，兄弟按 created_at 升序；时间相等按 post_id 稳定排序
+     *
+     * @param int   $discussionId
+     * @param int[] $visiblePostIds
+     * @return array<int, array{post_id:int,parent_post_id:?int,depth:int}>
      */
-    public function flattenedOrder(int $discussionId): array
+    public function flattenedOrderVisible(int $discussionId, array $visiblePostIds): array
     {
-        $rows = $this->db->table('threadify_threads')
-            ->where('discussion_id', $discussionId)
-            ->select(['post_id', 'parent_post_id', 'depth', 'created_at'])
-            ->orderBy('created_at', 'asc') // 只是便于初始分组；最终顺序我们在 PHP 里 DFS
+        if (empty($visiblePostIds)) return [];
+
+        $rows = $this->db->table('threadify_threads as t')
+            ->join('posts as p', 'p.id', '=', 't.post_id')
+            ->where('t.discussion_id', $discussionId)
+            ->whereIn('t.post_id', $visiblePostIds)
+            ->selectRaw('t.post_id, t.parent_post_id, t.depth, COALESCE(t.created_at, p.created_at) AS created_at')
+            ->orderBy('created_at', 'asc')
             ->get();
 
-        // 建邻接表
         $byParent = [];
-        $meta     = [];
         foreach ($rows as $r) {
             $pid = $r->parent_post_id ?: 0;
             $byParent[$pid][] = $r;
-            $meta[$r->post_id] = $r;
         }
 
-        // 根（parent_post_id 为空）
-        $roots = $byParent[0] ?? [];
-        usort($roots, fn($a, $b) => strcmp($a->created_at, $b->created_at));
+        $sortByTime = static function (&$arr) {
+            usort($arr, static function ($a, $b) {
+                $ta = $a->created_at ?? '';
+                $tb = $b->created_at ?? '';
+                if ($ta === $tb) return ($a->post_id <=> $b->post_id);
+                return $ta <=> $tb;
+            });
+        };
 
         $out = [];
-        $dfs = function($node) use (&$dfs, &$byParent, &$out) {
+        $dfs = function ($node) use (&$dfs, &$byParent, &$out, $sortByTime) {
             $out[] = [
                 'post_id'        => (int) $node->post_id,
-                'parent_post_id' => $node->parent_post_id ? (int)$node->parent_post_id : null,
+                'parent_post_id' => $node->parent_post_id ? (int) $node->parent_post_id : null,
                 'depth'          => (int) $node->depth,
             ];
             $children = $byParent[$node->post_id] ?? [];
             if ($children) {
-                usort($children, fn($a, $b) => strcmp($a->created_at, $b->created_at));
+                $sortByTime($children);
                 foreach ($children as $ch) $dfs($ch);
             }
         };
 
-        foreach ($roots as $root) $dfs($root);
+        $roots = $byParent[0] ?? [];
+        if ($roots) {
+            $sortByTime($roots);
+            foreach ($roots as $root) $dfs($root);
+        }
 
         return $out;
     }
 }
+
