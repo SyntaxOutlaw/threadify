@@ -1,51 +1,57 @@
-// Threadify — Inset Accent Bar with site secondary color (compat both class names)
-// 只用缩进 + 正文左缘内凹色条；同时支持 .thread-depth-* 与 .Post--thread-depth-*
-
 @thread-indent-size: 30px;
 
-// 颜色来源：优先主题变量，兜底 #D1B790
-:root {
-  --threadify-accent: var(--secondary-color, var(--secondary, #D1B790));
-}
+/* 在 article.Post 上强制缩进；同时兼容 .thread-depth-* 和 .Post--thread-depth-* */
+article.Post.thread-depth-1,
+article.Post.Post--thread-depth-1 { margin-left: (@thread-indent-size * 1) !important; }
+article.Post.thread-depth-2,
+article.Post.Post--thread-depth-2 { margin-left: (@thread-indent-size * 2) !important; }
+article.Post.thread-depth-3,
+article.Post.Post--thread-depth-3 { margin-left: (@thread-indent-size * 3) !important; }
+article.Post.thread-depth-4,
+article.Post.Post--thread-depth-4 { margin-left: (@thread-indent-size * 4) !important; }
+article.Post.thread-depth-5,
+article.Post.Post--thread-depth-5 { margin-left: (@thread-indent-size * 5) !important; }
+article.Post.thread-depth-6,
+article.Post.Post--thread-depth-6 { margin-left: (@thread-indent-size * 6) !important; }
+article.Post.thread-depth-7,
+article.Post.Post--thread-depth-7 { margin-left: (@thread-indent-size * 7) !important; }
+article.Post.thread-depth-8,
+article.Post.Post--thread-depth-8 { margin-left: (@thread-indent-size * 8) !important; }
+article.Post.thread-depth-9,
+article.Post.Post--thread-depth-9 { margin-left: (@thread-indent-size * 9) !important; }
+article.Post.thread-depth-10,
+article.Post.Post--thread-depth-10 { margin-left: (@thread-indent-size * 10) !important; }
 
-/* —— 层级缩进（桌面端）：两套类名都生效 —— */
-.thread-depth-1,  .Post--thread-depth-1  { margin-left: (@thread-indent-size * 1); }
-.thread-depth-2,  .Post--thread-depth-2  { margin-left: (@thread-indent-size * 2); }
-.thread-depth-3,  .Post--thread-depth-3  { margin-left: (@thread-indent-size * 3); }
-.thread-depth-4,  .Post--thread-depth-4  { margin-left: (@thread-indent-size * 4); }
-.thread-depth-5,  .Post--thread-depth-5  { margin-left: (@thread-indent-size * 5); }
-.thread-depth-6,  .Post--thread-depth-6  { margin-left: (@thread-indent-size * 6); }
-.thread-depth-7,  .Post--thread-depth-7  { margin-left: (@thread-indent-size * 7); }
-.thread-depth-8,  .Post--thread-depth-8  { margin-left: (@thread-indent-size * 8); }
-.thread-depth-9,  .Post--thread-depth-9  { margin-left: (@thread-indent-size * 9); }
-.thread-depth-10, .Post--thread-depth-10 { margin-left: (@thread-indent-size * 10); }
-
-/* —— 正文左缘“内凹色条”（两套类名共用）—— */
+/* 你当前的“内凹副色条”样式可以保留在 .Post-body 上，互不影响 */
 .threaded-post .Post-body,
 .Post--threaded .Post-body {
   box-shadow: inset 2px 0 0 var(--threadify-accent);
   transition: box-shadow .2s ease;
-  padding-left: 10px;   // 给细条留一点视觉空间
+  padding-left: 10px;
 }
 
-/* 悬停轻微强调（如不需要可删除） */
-.threaded-post:hover .Post-body,
-.Post--threaded:hover .Post-body {
-  box-shadow: inset 4px 0 0 var(--threadify-accent);
-}
-
-/* —— 移动端仅减小缩进（两套类名都覆盖）—— */
+/* 移动端缩进（同样命中外层容器） */
 @media (max-width: 768px) {
-  .thread-depth-1,  .Post--thread-depth-1,
-  .thread-depth-2,  .Post--thread-depth-2,
-  .thread-depth-3,  .Post--thread-depth-3,
-  .thread-depth-4,  .Post--thread-depth-4,
-  .thread-depth-5,  .Post--thread-depth-5,
-  .thread-depth-6,  .Post--thread-depth-6,
-  .thread-depth-7,  .Post--thread-depth-7,
-  .thread-depth-8,  .Post--thread-depth-8,
-  .thread-depth-9,  .Post--thread-depth-9,
-  .thread-depth-10, .Post--thread-depth-10 {
+  article.Post.thread-depth-1,
+  article.Post.Post--thread-depth-1,
+  article.Post.thread-depth-2,
+  article.Post.Post--thread-depth-2,
+  article.Post.thread-depth-3,
+  article.Post.Post--thread-depth-3,
+  article.Post.thread-depth-4,
+  article.Post.Post--thread-depth-4,
+  article.Post.thread-depth-5,
+  article.Post.Post--thread-depth-5,
+  article.Post.thread-depth-6,
+  article.Post.Post--thread-depth-6,
+  article.Post.thread-depth-7,
+  article.Post.Post--thread-depth-7,
+  article.Post.thread-depth-8,
+  article.Post.Post--thread-depth-8,
+  article.Post.thread-depth-9,
+  article.Post.Post--thread-depth-9,
+  article.Post.thread-depth-10,
+  article.Post.Post--thread-depth-10 {
     margin-left: 8px !important;
   }
 }
