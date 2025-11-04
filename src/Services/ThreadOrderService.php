@@ -20,13 +20,25 @@ class ThreadOrderService
     {
         if (empty($visiblePostIds)) return [];
 
-        $rows = $this->db->table('threadify_threads as t')
-            ->join('posts as p', 'p.id', '=', 't.post_id')
-            ->where('t.discussion_id', $discussionId)
-            ->whereIn('t.post_id', $visiblePostIds)
-            ->selectRaw('t.post_id, t.parent_post_id, t.depth, COALESCE(t.created_at, p.created_at) AS created_at')
-            ->orderBy('created_at', 'asc')
+        $rows = $this->db->table('threadify_threads')
+            ->join('posts', 'posts.id', '=', 'threadify_threads.post_id')
+            ->where('threadify_threads.discussion_id', $discussionId)
+            ->whereIn('threadify_threads.post_id', $visiblePostIds)
+            ->select([
+                'threadify_threads.post_id',
+                'threadify_threads.parent_post_id',
+                'threadify_threads.depth',
+                'threadify_threads.created_at as t_created_at',
+                'threadify_threads.updated_at as t_updated_at',
+                'posts.created_at as p_created_at',
+                'posts.updated_at as p_updated_at',
+            ])
+            ->orderBy('threadify_threads.created_at', 'asc')
             ->get();
+
+        foreach ($rows as $r) {
+            $r->_created_at = $r->t_created_at ?? $r->p_created_at ?? null;
+        }
 
         $byParent = [];
         foreach ($rows as $r) {
@@ -36,8 +48,8 @@ class ThreadOrderService
 
         $sortByTime = static function (&$arr) {
             usort($arr, static function ($a, $b) {
-                $ta = $a->created_at ?? '';
-                $tb = $b->created_at ?? '';
+                $ta = $a->_created_at ?? '';
+                $tb = $b->_created_at ?? '';
                 if ($ta === $tb) return ($a->post_id <=> $b->post_id);
                 return $ta <=> $tb;
             });
@@ -66,4 +78,3 @@ class ThreadOrderService
         return $out;
     }
 }
-
