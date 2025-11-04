@@ -1,23 +1,16 @@
-// js/src/forum/index.js
 import app from 'flarum/forum/app';
 import { extend } from 'flarum/common/extend';
 
 import DiscussionPage from 'flarum/forum/components/DiscussionPage';
+import DiscussionListItem from 'flarum/forum/components/DiscussionListItem';
 
 import { initThreadedPost } from './components/ThreadedPost';
 import { initThreadedReplyComposer } from './components/ThreadedReplyComposer';
 
-// 基于 API 的 PostStream 重排（保持分页空洞、兼容 Scrubber）
-import { installApiThreadedPostStream } from './components/ApiThreadedPostStream';
-import { prefetchThreadsOrder } from './utils/ThreadsApi';
+import { installDomReorderMode } from './utils/DomReorderMode';
+import { prefetchThreadOrder } from './utils/ThreadOrderPrefetch'; // 你已有的轻量预取，可继续用来提升首屏命中
 
-// 可选：监听新增 .PostStream-item[data-id]，在 Realtime/分页新增时合并触发一次状态重排
-import { installNewPostObserver } from './utils/NewPostObserver';
-
-/**
- * 日志控制（默认屏蔽，可在控制台开启）
- * 仅影响以 "[Threadify]" 开头的日志；其余 console 输出不受影响。
- */
+// 可选：控制 Threadify 日志的开/关（保持你之前的实现）
 (function setupThreadifyLoggingToggle() {
   const NS = '[Threadify]';
   const KEY = 'threadify:logs';
@@ -31,8 +24,7 @@ import { installNewPostObserver } from './utils/NewPostObserver';
     });
   }
 
-  const persisted =
-    typeof localStorage !== 'undefined' ? localStorage.getItem(KEY) : null;
+  const persisted = typeof localStorage !== 'undefined' ? localStorage.getItem(KEY) : null;
   let enabled = persisted === '1';
 
   function applyWrap() {
@@ -65,42 +57,34 @@ import { installNewPostObserver } from './utils/NewPostObserver';
 })();
 
 app.initializers.add('syntaxoutlaw-threadify', () => {
-  // 1) 仅给帖子元素补充深度类（不改 PostStream 布局）
-  initThreadedPost();
-
-  // 2) 提交时自动抽取 mentions → parent_id
+  // 1) 提交时自动带上 parent_id（你的已有逻辑）
   initThreadedReplyComposer();
 
-  // 3) 安装“API 线程顺序 + posts() 状态重排”方案（保持分页空洞，Scrubber 可用）
-  installApiThreadedPostStream();
+  // 2) 给帖子组件加深度类（可留可去；不会影响 Scrubber）
+  initThreadedPost();
 
-  // 4) 监听新增楼层（Realtime/分页加载），合并抖动后触发一次状态重排
-  installNewPostObserver();
+  // 3) 安装“DOM 物理重排 + 观察器”模式（核心）
+  installDomReorderMode();
 
-  // 5) 打开讨论页即预取 order（payload 极小，减少首帧重排）
+  // 4) 提前预取顺序（优化首屏命中）
   extend(DiscussionPage.prototype, 'oninit', function () {
     const did =
       (this.discussion && typeof this.discussion.id === 'function' && this.discussion.id()) ||
       (this.discussion && this.discussion.id) ||
       null;
-    if (did) prefetchThreadsOrder(did);
+    if (did) prefetchThreadOrder(did);
   });
 
-  // 6) 当 /threads-order 预取完成时，若仍在同一讨论页，轻量重绘一次以套用最新顺序
-  window.addEventListener('threadify:order-ready', (ev) => {
-    const readyDid = ev && ev.detail && ev.detail.discussionId;
-    if (!readyDid) return;
-
-    try {
-      const page = app.current && app.current.get && app.current.get('component');
-      const did =
-        (page && page.discussion && typeof page.discussion.id === 'function' && page.discussion.id()) ||
-        (page && page.discussion && page.discussion.id) ||
-        null;
-
-      if (did && String(did) === String(readyDid)) {
-        m.redraw();
-      }
-    } catch (_) {}
+  // 5) 在讨论列表悬停/触摸即预取
+  extend(DiscussionListItem.prototype, 'oncreate', function () {
+    const discussion = this.attrs.discussion;
+    if (!discussion) return;
+    const did = discussion.id();
+    const handler = () => prefetchThreadOrder(did);
+    if (this.element) {
+      this.element.addEventListener('mouseenter', handler, { once: true });
+      this.element.addEventListener('touchstart', handler, { once: true, passive: true });
+    }
   });
 });
+
