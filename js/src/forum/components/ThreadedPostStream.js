@@ -15,15 +15,15 @@ let originalPostsMethod = null;
 let lastPostCount = 0;
 let currentDiscussionId = null;
 
-// 分页期间：彻底暂停线程化（返回原生 posts），避免 anchorScroll 取不到锚点
+// 分页期间暂停线程化（让 anchorScroll 拿到稳定锚点）
 let suspendThreading = false;
 let rebuildPending = false;
 
-// 轻量补充：补父 / 少量子（可开关）
+// 轻量补充：补父 / 少量子
 const enableMinimalChildLoading = true;
 
 export function initThreadedPostStream() {
-  // 在分页开始/结束时切换“暂停重排”标志，并在结束后补做一次重排
+  // 分页开始/结束：暂停 → 结束后如有标记再补一次重排
   override(PostStreamState.prototype, '_loadPrevious', function (original, ...args) {
     suspendThreading = true;
     const p = original(...args);
@@ -50,36 +50,62 @@ export function initThreadedPostStream() {
     });
   });
 
+  // ✅ 新增：在“可见列表”阶段就按预取顺序做稳定排序，消除闪烁
+  extend(PostStreamState.prototype, 'visiblePosts', function (result) {
+    if (!Array.isArray(result) || result.length <= 1) return;
+
+    // 当前讨论 id
+    const did =
+      (this.discussion && typeof this.discussion.id === 'function' && this.discussion.id()) ||
+      (this.discussion && this.discussion.id) ||
+      null;
+
+    // 就地稳定排序：1) 预取顺序；2)（若无）已计算缓存顺序；3) 否则保持原样
+    result.sort((a, b) => {
+      const aid = a && a.id ? a.id() : null;
+      const bid = b && b.id ? b.id() : null;
+      if (!aid || !bid) return 0;
+
+      // 1) 预取顺序：/threads-order
+      const ao = getOrderIndex(did, aid);
+      const bo = getOrderIndex(did, bid);
+      if (ao != null || bo != null) {
+        if (ao == null) return 1;
+        if (bo == null) return -1;
+        if (ao !== bo) return ao - bo;
+      }
+
+      // 2) 若上一步都没有，就尽量把已有帖子（非 null）排在前面（防御性）
+      return 0;
+    });
+  });
+
   // 绑定 PostStream 生命周期
   extend(PostStream.prototype, 'oninit', function () {
     const did = this.stream && this.stream.discussion && this.stream.discussion.id();
     if (currentDiscussionId !== did) resetState(did);
 
-    if (did) prefetchThreadOrder(did);          // 首帧预取全局顺序（非常轻）
+    if (did) prefetchThreadOrder(did);      // 首帧预取（极小开销）
 
     if (!originalPostsMethod) originalPostsMethod = this.stream.posts;
 
-    // 覆盖 posts()：分页中直接返回原生 posts；平时优先返回缓存
+    // 覆盖 posts()：分页中返回原生；平时优先返回缓存
     this.stream.posts = () => {
       if (suspendThreading) {
-        // 分页期：完全回退到原生顺序，保障 anchorScroll
         return originalPostsMethod.call(this.stream) || [];
       }
       if (reorderedPostsCache) return reorderedPostsCache;
 
       const original = originalPostsMethod.call(this.stream) || [];
-      // 初载且有内容时拉起一次重排（异步，不阻断首帧）
       if (!isReordering && original.filter(Boolean).length > 0) {
-        scheduleRebuild(this);
+        scheduleRebuild(this);              // 异步，不阻断首帧
       }
       return original;
     };
 
-    // 记录当前帖子数
     const cur = originalPostsMethod.call(this.stream) || [];
     lastPostCount = cur.filter(Boolean).length;
 
-    // 首帧尽量重排（若不在分页中）
     if (lastPostCount > 0 && !suspendThreading) scheduleRebuild(this);
   });
 
@@ -87,7 +113,7 @@ export function initThreadedPostStream() {
     clearThreadDepthCache();
   });
 
-  // 帖子数变化：分页中仅做标记，结束后补排；非分页立即重排
+  // 帖子数变化：分页中仅打标记；结束后补排；非分页立即重排
   extend(PostStream.prototype, 'onupdate', function () {
     if (!originalPostsMethod) return;
     const current = originalPostsMethod.call(this.stream) || [];
@@ -110,7 +136,6 @@ export function initThreadedPostStream() {
 // ========== 重排主流程 ========== //
 
 function scheduleRebuild(postStream) {
-  // 避免同步阻塞渲染
   setTimeout(() => updateReorderedCache(postStream), 0);
 }
 
@@ -138,7 +163,7 @@ function updateReorderedCache(postStream) {
       .then((postsReady) => {
         const did = postStream.stream && postStream.stream.discussion && postStream.stream.discussion.id();
 
-        // —— 优先按 /threads-order 预取顺序排序 —— //
+        // 优先按 /threads-order 预取顺序排序
         const orderOf = (p) => {
           const id = p && p.id ? p.id() : null;
           if (!id) return null;
@@ -178,7 +203,7 @@ function updateReorderedCache(postStream) {
   }
 
   function finish(arr) {
-    reorderedPostsCache = arr;         // 允许为 null：上层会回退原数组
+    reorderedPostsCache = arr;
     isReordering = false;
     setTimeout(() => m.redraw(), 0);
   }
@@ -188,7 +213,7 @@ function padToOriginalLength(originalPosts, threadedPosts) {
   if (!Array.isArray(threadedPosts) || threadedPosts.length === 0) return originalPosts;
   const result = [...threadedPosts];
   const need = Math.max(0, originalPosts.length - threadedPosts.length);
-  for (let i = 0; i < need; i++) result.push(null); // 只补 null，绝不返回 undefined
+  for (let i = 0; i < need; i++) result.push(null); // 只补 null
   return result;
 }
 
