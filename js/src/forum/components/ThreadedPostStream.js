@@ -1,15 +1,16 @@
 // js/src/forum/components/ThreadedPostStream.js
 /**
- * Threaded PostStream (safe)
+ * Threaded PostStream (safe & working)
  * - 不改写 stream.posts()，不产生 null
  * - 仅在 PostStreamState.visiblePosts() 做稳定排序（父后子）
+ * - 使用 override 真正返回排序后的数组
  * - 加载期（翻页/锚点）不排序，避免与 anchorScroll 竞争
  * - 预取顺序优先；本地线程顺序为兜底
  * - 首帧原序，空闲后构建顺序映射并一次性稳定
  */
 
 import app from 'flarum/forum/app';
-import { extend } from 'flarum/common/extend';
+import { extend, override } from 'flarum/common/extend';
 import PostStream from 'flarum/forum/components/PostStream';
 import PostStreamState from 'flarum/forum/states/PostStreamState';
 
@@ -64,7 +65,6 @@ function buildOrderMap(postStream) {
     const posts = original.filter((p) => p && typeof p.id === 'function');
     if (posts.length === 0) return finish(null);
 
-    // 先保证上下文尽量完整，再生成“父后子”顺序
     const ctx = postStream.discussion ? postStream : { discussion: postStream.stream.discussion };
 
     loadMissingParentPosts(ctx, posts)
@@ -99,14 +99,14 @@ export function initThreadedPostStream() {
 
     if (did) prefetchThreadOrder(did);
 
-    // 顺序预取完成时（来自 utils/ThreadOrderPrefetch 的事件）→ 空闲后构建一次映射
+    // 预取完成 → 空闲后构建一次映射
     this._threadifyOrderHandler = (ev) => {
       if (String(did) !== String(ev?.detail)) return;
       waitForIdle(this, () => buildOrderMap(this));
     };
     try { window.addEventListener('threadify:orderReady', this._threadifyOrderHandler); } catch {}
 
-    // 首屏结束后构建一次映射（不阻断首帧）
+    // 首帧结束后构建一次映射（不阻断首帧）
     waitForIdle(this, () => buildOrderMap(this));
   });
 
@@ -133,14 +133,15 @@ export function initThreadedPostStream() {
     } catch {}
   });
 
-  // —— 仅在“非加载期”对可见列表做稳定排序（gap/占位符保持原位）——
-  extend(PostStreamState.prototype, 'visiblePosts', function (result) {
-    if (!Array.isArray(result) || result.length <= 1) return result;
+  // —— 用 override 真正返回我们的排序结果 —— //
+  override(PostStreamState.prototype, 'visiblePosts', function (original) {
+    const result = original.call(this);
 
-    if (streamBusy(this)) return result; // 加载/锚点期不排序
+    // 加载/锚点期不排序
+    if (streamBusy(this)) return result;
 
     const did = this.discussion?.id?.();
-    if (!did) return result;
+    if (!did || !Array.isArray(result) || result.length <= 1) return result;
 
     const arr = result.slice();
 
