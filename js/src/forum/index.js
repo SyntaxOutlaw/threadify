@@ -1,10 +1,12 @@
 import app from 'flarum/forum/app';
-import DiscussionPage from 'flarum/forum/components/DiscussionPage';
 import { extend } from 'flarum/common/extend';
+
+import DiscussionPage from 'flarum/forum/components/DiscussionPage';
+import DiscussionListItem from 'flarum/forum/components/DiscussionListItem';
 
 import { initThreadedPost } from './components/ThreadedPost';
 import { initThreadedReplyComposer } from './components/ThreadedReplyComposer';
-import { initThreadedPostStream } from './components/ThreadedPostStream'; // 用你当前的（无首帧阻断）版本
+import { initThreadedPostStream } from './components/ThreadedPostStream';
 import { prefetchThreadOrder } from './utils/ThreadOrderPrefetch';
 
 app.initializers.add('syntaxoutlaw-threadify', () => {
@@ -12,9 +14,20 @@ app.initializers.add('syntaxoutlaw-threadify', () => {
   initThreadedReplyComposer();
   initThreadedPostStream();
 
-  // 讨论页 oninit 立刻预取顺序（payload 极小，通常 < 10ms）
-  extend(DiscussionPage.prototype, 'oninit', function() {
+  // 进入讨论页即预取
+  extend(DiscussionPage.prototype, 'oninit', function () {
     const did = this.discussion && this.discussion.id && this.discussion.id();
     if (did) prefetchThreadOrder(did);
+  });
+
+  // 讨论列表项：首次鼠标悬停 / 触摸即预取，提升命中率
+  extend(DiscussionListItem.prototype, 'oncreate', function () {
+    const discussion = this.attrs.discussion;
+    if (!discussion) return;
+    const did = discussion.id();
+    const handler = () => prefetchThreadOrder(did);
+    // 只触发一次即可
+    this.element && this.element.addEventListener('mouseenter', handler, { once: true });
+    this.element && this.element.addEventListener('touchstart', handler, { once: true, passive: true });
   });
 });
