@@ -3,28 +3,35 @@
  * 提供：
  *  - prefetchThreadOrder(did) -> Promise<void>
  *  - getOrderIndex(did, postId) -> number|undefined
- *  - getDepth(did, postId) / getParentId(did, postId)
+ *  - getDepthPrefetched(did, postId) / getParentPrefetched(did, postId)
  */
 
 const _cache = new Map(); // did -> { map: Map<postId, {order, depth, parentId}>, ready: Promise }
 
 export function prefetchThreadOrder(discussionId) {
   const did = String(discussionId);
-  if (_cache.has(did) && _cache.get(did).ready) return _cache.get(did).ready;
+  const exist = _cache.get(did);
+  if (exist && exist.ready) return exist.ready;
 
-  const entry = { map: new Map(), ready: null };
+  const entry = exist || { map: new Map(), ready: null };
   _cache.set(did, entry);
 
   entry.ready = app.request({
     method: 'GET',
     url: `${app.forum.attribute('apiUrl')}/discussions/${did}/threads-order`,
+    // 浏览器自动处理 ETag/304；我们不必手动缓存头
   }).then((res) => {
     const map = new Map();
     (res.order || []).forEach(({ postId, order, depth, parentPostId }) => {
-      map.set(Number(postId), { order: Number(order), depth: Number(depth), parentId: parentPostId ? Number(parentPostId) : null });
+      map.set(Number(postId), {
+        order: Number(order),
+        depth: Number(depth),
+        parentId: parentPostId != null ? Number(parentPostId) : null
+      });
     });
     entry.map = map;
-    m.redraw(); // 预取完成后让可见列表按顺序重绘（通常很快）
+    // 预取完成后，visiblePosts 的比较器会立刻按映射重排（通常无跳动）
+    m.redraw();
   }).catch((e) => {
     console.warn('[Threadify] order prefetch failed', e);
   });
