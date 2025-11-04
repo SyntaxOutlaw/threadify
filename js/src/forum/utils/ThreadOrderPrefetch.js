@@ -4,18 +4,9 @@
  *  - prefetchThreadOrder(did) -> Promise<void>
  *  - getOrderIndex(did, postId) -> number|undefined
  *  - getDepth(did, postId) / getParentId(did, postId)
- *
- * 最小修复：避免在分页加载期触发强制重绘，降低与 anchorScroll 的竞争。
  */
 
 const _cache = new Map(); // did -> { map: Map<postId, {order, depth, parentId}>, ready: Promise }
-
-// 尝试检测当前页面的 PostStreamState 是否处于加载中
-function isBusy() {
-  const cur = app.current && app.current.data;
-  const state = cur && cur.stream;
-  return !!(state && Object.keys(state).some((k) => /^loading/i.test(k) && state[k]));
-}
 
 export function prefetchThreadOrder(discussionId) {
   const did = String(discussionId);
@@ -30,20 +21,10 @@ export function prefetchThreadOrder(discussionId) {
   }).then((res) => {
     const map = new Map();
     (res.order || []).forEach(({ postId, order, depth, parentPostId }) => {
-      map.set(Number(postId), {
-        order: Number(order),
-        depth: Number(depth),
-        parentId: parentPostId ? Number(parentPostId) : null,
-      });
+      map.set(Number(postId), { order: Number(order), depth: Number(depth), parentId: parentPostId ? Number(parentPostId) : null });
     });
     entry.map = map;
-
-    // 预取完成后：如果不在加载，就立即重绘；否则稍后再试一次
-    if (!isBusy()) {
-      try { m.redraw(); } catch (e) {}
-    } else {
-      setTimeout(() => { if (!isBusy()) { try { m.redraw(); } catch (e) {} } }, 100);
-    }
+    m.redraw(); // 预取完成后让可见列表按顺序重绘（通常很快）
   }).catch((e) => {
     console.warn('[Threadify] order prefetch failed', e);
   });
