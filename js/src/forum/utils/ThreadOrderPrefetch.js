@@ -1,9 +1,13 @@
+// js/src/forum/utils/ThreadOrderPrefetch.js
+
 /**
  * 轻量顺序预取：/discussions/:id/threads-order
  * 提供：
  *  - prefetchThreadOrder(did) -> Promise<void>
  *  - getOrderIndex(did, postId) -> number|undefined
- *  - getDepth(did, postId) / getParentId(did, postId)
+ *  - getDepthPrefetched(did, postId) -> number|undefined
+ *  - getParentPrefetched(did, postId) -> number|undefined
+ * 并在预取完成后派发 window 事件：'threadify:order-ready'（detail: { discussionId }）
  */
 
 const _cache = new Map(); // did -> { map: Map<postId, {order, depth, parentId}>, ready: Promise }
@@ -21,10 +25,19 @@ export function prefetchThreadOrder(discussionId) {
   }).then((res) => {
     const map = new Map();
     (res.order || []).forEach(({ postId, order, depth, parentPostId }) => {
-      map.set(Number(postId), { order: Number(order), depth: Number(depth), parentId: parentPostId ? Number(parentPostId) : null });
+      map.set(Number(postId), {
+        order: Number(order),
+        depth: Number.isFinite(depth) ? Number(depth) : 0,
+        parentId: parentPostId ? Number(parentPostId) : null,
+      });
     });
     entry.map = map;
-    m.redraw(); // 预取完成后让可见列表按顺序重绘（通常很快）
+
+    // 通知各处“顺序可用”
+    try {
+      window.dispatchEvent(new CustomEvent('threadify:order-ready', { detail: { discussionId: Number(did) } }));
+    } catch (e) { /* older browsers */ }
+
   }).catch((e) => {
     console.warn('[Threadify] order prefetch failed', e);
   });
@@ -52,3 +65,4 @@ export function getParentPrefetched(discussionId, postId) {
   const rec = entry.map.get(Number(postId));
   return rec ? rec.parentId : undefined;
 }
+
