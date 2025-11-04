@@ -53,7 +53,6 @@ class ListDiscussionThreadsOrderController implements RequestHandlerInterface
                 ->all();
 
             if (empty($visibleIds)) {
-                // 讨论存在但当前用户看不到任何帖子
                 $payload = [
                     'discussionId' => $discussionId,
                     'order'        => [],
@@ -64,25 +63,40 @@ class ListDiscussionThreadsOrderController implements RequestHandlerInterface
                 ]);
             }
 
-            // 读取 threadify_threads（连 posts 以回退 created_at），只保留可见帖子
-            $rows = $db->table('threadify_threads as t')
-                ->join('posts as p', 'p.id', '=', 't.post_id')
-                ->where('t.discussion_id', $discussionId)
-                ->whereIn('t.post_id', $visibleIds)
-                ->selectRaw('t.post_id, t.parent_post_id, t.depth, COALESCE(t.created_at, p.created_at) AS created_at, COALESCE(t.updated_at, t.created_at, p.updated_at, p.created_at) AS updated_at')
-                // 预排序仅为构邻接表提供更稳定的初始序；真正顺序由 DFS 决定
-                ->orderBy('created_at', 'asc')
+            // 不使用别名，避免表前缀影响；把需要的时间列分别取回，COALESCE 在 PHP 侧做
+            $rows = $db->table('threadify_threads')
+                ->join('posts', 'posts.id', '=', 'threadify_threads.post_id')
+                ->where('threadify_threads.discussion_id', $discussionId)
+                ->whereIn('threadify_threads.post_id', $visibleIds)
+                ->select([
+                    'threadify_threads.post_id',
+                    'threadify_threads.parent_post_id',
+                    'threadify_threads.depth',
+                    'threadify_threads.created_at as t_created_at',
+                    'threadify_threads.updated_at as t_updated_at',
+                    'posts.created_at as p_created_at',
+                    'posts.updated_at as p_updated_at',
+                ])
+                // 预排序仅用于初步稳定，真正顺序由 DFS 确定
+                ->orderBy('threadify_threads.created_at', 'asc')
                 ->get();
 
-            // 计算 Last-Modified / ETag（基于最大更新时间）
+            // 计算合并后的 created/updated，并求 Last-Modified / ETag
             $lastUpdatedAt = null;
             foreach ($rows as $r) {
-                $ts = $r->updated_at ?? null;
-                if ($ts !== null && ($lastUpdatedAt === null || $ts > $lastUpdatedAt)) {
-                    $lastUpdatedAt = $ts;
+                // COALESCE(created_at)
+                $r->_created_at = $r->t_created_at ?? $r->p_created_at ?? null;
+                // COALESCE(updated_at, created_at)
+                $r->_updated_at = $r->t_updated_at
+                    ?? $r->t_created_at
+                    ?? $r->p_updated_at
+                    ?? $r->p_created_at
+                    ?? null;
+
+                if ($r->_updated_at !== null && ($lastUpdatedAt === null || $r->_updated_at > $lastUpdatedAt)) {
+                    $lastUpdatedAt = $r->_updated_at;
                 }
             }
-            // 如果计算不到，就用讨论更新时间兜底
             if ($lastUpdatedAt === null && $discussion->updated_at) {
                 $lastUpdatedAt = $discussion->updated_at->toDateTimeString();
             }
@@ -92,7 +106,6 @@ class ListDiscussionThreadsOrderController implements RequestHandlerInterface
             // 条件请求：If-None-Match / If-Modified-Since
             $ifNoneMatch     = $request->getHeaderLine('If-None-Match') ?: null;
             $ifModifiedSince = $request->getHeaderLine('If-Modified-Since') ?: null;
-
             if ($etag && $ifNoneMatch && trim($ifNoneMatch) === $etag) {
                 return new EmptyResponse(304, [
                     'ETag'          => $etag,
@@ -108,7 +121,7 @@ class ListDiscussionThreadsOrderController implements RequestHandlerInterface
                 ]);
             }
 
-            // ---- 构建邻接表并 DFS 扁平化（父后跟子，兄弟按时间升序；时间相等时按 post_id 稳定排序） ----
+            // ---- 构邻接表 & DFS 扁平化（父后跟子，兄弟按时间升序；时间相等按 post_id 稳定）----
             $byParent = [];
             foreach ($rows as $r) {
                 $pid = $r->parent_post_id ?: 0;
@@ -117,14 +130,12 @@ class ListDiscussionThreadsOrderController implements RequestHandlerInterface
 
             $sortByTime = static function (&$arr) {
                 usort($arr, static function ($a, $b) {
-                    $ta = $a->created_at ?? '';
-                    $tb = $b->created_at ?? '';
+                    $ta = $a->_created_at ?? '';
+                    $tb = $b->_created_at ?? '';
                     if ($ta === $tb) {
-                        // 稳定性保障：时间相同按 post_id
                         return ($a->post_id <=> $b->post_id);
                     }
-                    // DATETIME 字符串字典序可比较时间先后
-                    return $ta <=> $tb;
+                    return $ta <=> $tb; // DATETIME 字符串可直接字典序比较
                 });
             };
 
@@ -132,7 +143,7 @@ class ListDiscussionThreadsOrderController implements RequestHandlerInterface
             $dfs = function ($node) use (&$dfs, &$byParent, &$order, $sortByTime) {
                 $order[] = [
                     'postId'       => (int) $node->post_id,
-                    'order'        => 0,  // 占位，稍后写入索引
+                    'order'        => 0,
                     'depth'        => (int) $node->depth,
                     'parentPostId' => $node->parent_post_id ? (int) $node->parent_post_id : null,
                 ];
@@ -169,13 +180,12 @@ class ListDiscussionThreadsOrderController implements RequestHandlerInterface
 
             return new JsonResponse($payload, 200, $headers);
         } catch (\Throwable $e) {
-            // 记录错误但不把 PHP 警告/notice 混入 JSON
             try {
                 resolve('log')->error('[Threadify] threads-order error: '.$e->getMessage(), [
                     'trace' => $e->getTraceAsString(),
                 ]);
             } catch (\Throwable $e2) {
-                // ignore logger failures
+                // ignore
             }
 
             return new JsonResponse([
