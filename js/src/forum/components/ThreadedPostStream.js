@@ -1,31 +1,36 @@
-// js/src/forum/components/ThreadedPostStream.js
 /**
- * Threaded PostStream (safe & working)
- * - 不改写 stream.posts()，不产生 null
- * - 仅在 PostStreamState.visiblePosts() 做稳定排序（父后子）
- * - 使用 override 真正返回排序后的数组
- * - 加载期（翻页/锚点）不排序，避免与 anchorScroll 竞争
- * - 预取顺序优先；本地线程顺序为兜底
- * - 首帧原序，空闲后构建顺序映射并一次性稳定
+ * Threaded PostStream Component (stable + prefetch + ancestor completion)
+ *
+ * 设计要点：
+ * - 首帧不阻断：首次渲染仍走 Flarum 原序；
+ * - 预取全局顺序：/threads-order；
+ * - 依据预取映射「向上补齐缺失祖先」（最多 MAX_ANCESTOR_STEPS 层），随后用全局顺序重排；
+ * - 不再改写 visiblePosts（避免 anchorScroll 报错）；
+ * - 仅当帖子数变化且 PostStreamState 不处于任何 loading 阶段时才重建缓存；
+ * - 预取失败则回退到“补父 + 少量子 + 简易线程化（ThreadTree）”。
  */
 
 import app from 'flarum/forum/app';
-import { extend, override } from 'flarum/common/extend';
+import { extend } from 'flarum/common/extend';
 import PostStream from 'flarum/forum/components/PostStream';
-import PostStreamState from 'flarum/forum/states/PostStreamState';
 
 import { createThreadedPosts } from '../utils/ThreadTree';
 import { clearThreadDepthCache } from '../utils/ThreadDepth';
 import { loadMissingParentPosts, loadMinimalChildren } from '../utils/PostLoader';
-import { getOrderIndex, prefetchThreadOrder } from '../utils/ThreadOrderPrefetch';
+import { prefetchThreadOrder, getOrderIndex, getParentPrefetched, isPrefetched } from '../utils/ThreadOrderPrefetch';
 
-// ---- 模块状态 ------------------------------------------------------
-let building = false;
-let orderMap = null;            // Map<postId, order>
+// ---- 配置 -----------------------------------------------------------
+const MAX_ANCESTOR_STEPS = 3;      // 追溯祖先的层数上限，防止一次性拉太多
+const ENABLE_MINIMAL_CHILD_LOADING = true; // 预取缺失时的回退策略
+
+// ---- 模块级状态 ----------------------------------------------------
+let isReordering = false;
+let reorderedPostsCache = null;   // 线程化后的 posts（含 null 填充以保持分页长度）
+let lastPostCount = 0;
+let originalPostsMethod = null;
 let currentDiscussionId = null;
-let lastLoadedPostIds = '';
 
-// 判定 PostStream 是否忙碌（翻页/锚点附近加载）
+// ---- 工具：判定流是否忙碌（翻页/锚点附近加载等） --------------------
 function streamBusy(state) {
   if (!state) return false;
   return !!(
@@ -38,157 +43,267 @@ function streamBusy(state) {
   );
 }
 
-// 等待空闲后执行（最多 ~2s，50ms 间隔）
-function waitForIdle(postStream, fn, tries = 40) {
-  const state = postStream && postStream.stream;
-  if (!state) return fn();
-  if (!streamBusy(state)) {
-    try { return requestAnimationFrame(() => fn()); } catch { return setTimeout(fn, 0); }
-  }
-  if (tries <= 0) return;
-  setTimeout(() => waitForIdle(postStream, fn, tries - 1), 50);
-}
-
-// ---------- 顺序映射构建：补父/少量子 → 线程化 → Map(postId → order) ----------
-function buildOrderMap(postStream) {
-  if (building) return;
-  building = true;
-
-  const finish = (map) => {
-    orderMap = map || null;
-    building = false;
-    try { m.redraw(); } catch {}
-  };
-
-  try {
-    const original = postStream.stream.posts() || [];
-    const posts = original.filter((p) => p && typeof p.id === 'function');
-    if (posts.length === 0) return finish(null);
-
-    const ctx = postStream.discussion ? postStream : { discussion: postStream.stream.discussion };
-
-    loadMissingParentPosts(ctx, posts)
-      .then((withParents) => loadMinimalChildren(ctx, withParents).catch(() => withParents))
-      .then((ready) => {
-        const threaded = createThreadedPosts(ready);
-        const map = new Map();
-        let i = 0;
-        threaded.forEach((p) => { if (p && typeof p.id === 'function') map.set(p.id(), i++); });
-        finish(map);
-      })
-      .catch(() => {
-        const threaded = createThreadedPosts(posts);
-        const map = new Map();
-        let i = 0;
-        threaded.forEach((p) => { if (p && typeof p.id === 'function') map.set(p.id(), i++); });
-        finish(map);
-      });
-  } catch (e) {
-    console.error('[Threadify] buildOrderMap failed:', e);
-    finish(null);
-  }
-}
-
 // ===================================================================
-// 初始化：挂接 PostStream 生命周期 & 可见列表排序
+// 初始化：挂接 PostStream 生命周期
 // ===================================================================
 export function initThreadedPostStream() {
   extend(PostStream.prototype, 'oninit', function () {
-    const did = this.stream.discussion?.id?.();
+    const did = this.stream.discussion && this.stream.discussion.id && this.stream.discussion.id();
     if (currentDiscussionId !== did) resetState(did);
 
+    if (!originalPostsMethod) originalPostsMethod = this.stream.posts;
+
+    // 预取轻量顺序（payload 很小）
     if (did) prefetchThreadOrder(did);
 
-    // 预取完成 → 空闲后构建一次映射
-    this._threadifyOrderHandler = (ev) => {
-      if (String(did) !== String(ev?.detail)) return;
-      waitForIdle(this, () => buildOrderMap(this));
-    };
-    try { window.addEventListener('threadify:orderReady', this._threadifyOrderHandler); } catch {}
+    // 覆写 posts：若已有缓存则返回缓存；否则回退原始 posts
+    this.stream.posts = () => {
+      if (reorderedPostsCache) return reorderedPostsCache;
 
-    // 首帧结束后构建一次映射（不阻断首帧）
-    waitForIdle(this, () => buildOrderMap(this));
+      const original = originalPostsMethod.call(this.stream) || [];
+      // 首帧不阻断：异步尝试重建缓存（使用预取顺序 + 祖先补齐）
+      if (!isReordering && original.filter(Boolean).length > 0) {
+        buildCacheWithPrefetch(this);
+      }
+      return original;
+    };
+
+    // 记录首屏数量并尝试异步构建缓存
+    const cur = originalPostsMethod.call(this.stream) || [];
+    lastPostCount = cur.filter(Boolean).length;
+    if (lastPostCount > 0) buildCacheWithPrefetch(this);
   });
 
-  // 已加载帖子集变化 → 重新构建顺序映射
+  // 仅在帖子数变化时重建缓存；忙碌时跳过，稍后再试
   extend(PostStream.prototype, 'onupdate', function () {
-    const ids = (this.stream.posts() || [])
-      .filter((p) => p && typeof p.id === 'function')
-      .map((p) => p.id())
-      .join(',');
-    if (ids !== lastLoadedPostIds) {
-      lastLoadedPostIds = ids;
+    if (!originalPostsMethod) return;
+
+    const current = originalPostsMethod.call(this.stream) || [];
+    const count = current.filter(Boolean).length;
+
+    if (count !== lastPostCount) {
+      lastPostCount = count;
+      reorderedPostsCache = null;
       clearThreadDepthCache();
-      waitForIdle(this, () => buildOrderMap(this));
+
+      if (!streamBusy(this.stream)) {
+        buildCacheWithPrefetch(this);
+      } else {
+        setTimeout(() => {
+          if (!streamBusy(this.stream)) buildCacheWithPrefetch(this);
+        }, 60);
+      }
     }
   });
 
-  // 清理监听
-  extend(PostStream.prototype, 'onremove', function () {
-    try {
-      if (this._threadifyOrderHandler) {
-        window.removeEventListener('threadify:orderReady', this._threadifyOrderHandler);
-        this._threadifyOrderHandler = null;
-      }
-    } catch {}
-  });
-
-  // —— 用 override 真正返回我们的排序结果 —— //
-  override(PostStreamState.prototype, 'visiblePosts', function (original) {
-    const result = original.call(this);
-
-    // 加载/锚点期不排序
-    if (streamBusy(this)) return result;
-
-    const did = this.discussion?.id?.();
-    if (!did || !Array.isArray(result) || result.length <= 1) return result;
-
-    const arr = result.slice();
-
-    arr.sort((a, b) => {
-      const isPostA = !!(a && typeof a.id === 'function');
-      const isPostB = !!(b && typeof b.id === 'function');
-      if (!isPostA || !isPostB) return 0; // gap/占位符原位
-
-      const aid = a.id();
-      const bid = b.id();
-
-      // 1) 预取顺序优先（进入即位）
-      const ao = getOrderIndex(did, aid);
-      const bo = getOrderIndex(did, bid);
-      if (ao != null || bo != null) {
-        if (ao == null) return 1;
-        if (bo == null) return -1;
-        if (ao !== bo) return ao - bo;
-      }
-
-      // 2) 本地“父后子”顺序映射
-      const toA = orderMap?.get?.(aid);
-      const toB = orderMap?.get?.(bid);
-      if (toA != null || toB != null) {
-        if (toA == null) return 1;
-        if (toB == null) return -1;
-        if (toA !== toB) return toA - toB;
-      }
-
-      // 3) 其他情况保持原位（稳定排序）
-      return 0;
-    });
-
-    return arr;
+  // 预取就绪时，轻量尝试重建（避免同帧和 anchorScroll 打架）
+  window.addEventListener('threadify:orderReady', (ev) => {
+    const did = ev?.detail;
+    if (!did || did !== currentDiscussionId) return;
+    setTimeout(() => {
+      try {
+        if (!isReordering && !reorderedPostsCache) buildCacheWithPrefetch(this);
+      } catch {}
+    }, 0);
   });
 }
 
-// ---- 调试导出 ------------------------------------------------------
-export function isThreadingActive() { return !!orderMap; }
+// ===================================================================
+// 核心：使用“预取顺序 + 祖先补齐”构建缓存，失败时回退到简易线程化
+// ===================================================================
+function buildCacheWithPrefetch(postStream) {
+  if (isReordering) return;
+  isReordering = true;
+
+  const finish = (arr) => {
+    reorderedPostsCache = arr;
+    isReordering = false;
+    // 用 0ms 定时触发；避免与 core 的锚点计算同一帧冲突
+    setTimeout(() => { try { m.redraw(); } catch (e) {} }, 0);
+  };
+
+  try {
+    if (!originalPostsMethod) return finish(null);
+
+    const originalPosts = originalPostsMethod.call(postStream.stream) || [];
+    const validPosts = originalPosts.filter(Boolean);
+    if (validPosts.length === 0) return finish(null);
+
+    const did = postStream.stream.discussion && postStream.stream.discussion.id && postStream.stream.discussion.id();
+
+    const afterPrefetch = () =>
+      ensureAncestorsByPrefetch(did, validPosts)
+        .then((postsWithAncestors) => {
+          const sorted = sortByPrefetchOrder(did, postsWithAncestors);
+          if (sorted && sorted.length) {
+            const threadedArray = padNullsToLength(sorted, originalPosts.length);
+            finish(threadedArray);
+            return;
+          }
+
+          // —— 预取不可用或没有映射命中：回退到“补父 + 少量子 + 简易线程化” ——
+          ensureParentsLoaded(postStream, validPosts)
+            .then((postsWithParents) =>
+              ENABLE_MINIMAL_CHILD_LOADING
+                ? ensureMinimalChildren(postStream, postsWithParents)
+                : postsWithParents
+            )
+            .then((postsReady) => {
+              const threaded = createThreadedPosts(postsReady);
+              const threadedArray = padNullsToLength(threaded, originalPosts.length);
+              finish(threadedArray);
+            })
+            .catch((err) => {
+              console.warn('[Threadify] prefetch & fallback threading both failed:', err);
+              finish(null);
+            });
+        });
+
+    // 若预取尚未 ready，先触发一次预取再进入 afterPrefetch
+    if (did && !isPrefetched(did)) {
+      prefetchThreadOrder(did).finally(afterPrefetch);
+    } else {
+      afterPrefetch();
+    }
+  } catch (e) {
+    console.error('[Threadify] buildCacheWithPrefetch failed:', e);
+    isReordering = false;
+  }
+}
+
+// —— 根据预取映射向上补齐缺失祖先（最多 MAX_ANCESTOR_STEPS 层） ——
+function ensureAncestorsByPrefetch(discussionId, posts) {
+  return new Promise((resolve) => {
+    if (!discussionId || !Array.isArray(posts) || posts.length === 0) return resolve(posts);
+
+    const loaded = new Set(posts.map((p) => String(p.id && p.id())));
+    const toFetch = new Set();
+
+    for (const p of posts) {
+      let step = 0;
+      let cur = p && p.id && Number(p.id());
+      while (cur && step < MAX_ANCESTOR_STEPS) {
+        const parent = getParentPrefetched(discussionId, cur);
+        if (!parent) break;
+        if (!loaded.has(String(parent))) toFetch.add(String(parent));
+        cur = parent;
+        step++;
+      }
+    }
+
+    if (toFetch.size === 0) return resolve(posts);
+
+    app.store
+      .find('posts', { filter: { id: Array.from(toFetch).join(',') } })
+      .then((loadedParents) => {
+        // 合并并去重
+        const map = new Map(posts.map((p) => [String(p.id && p.id()), p]));
+        for (const lp of loadedParents || []) {
+          const id = String(lp.id && lp.id());
+          if (!map.has(id)) map.set(id, lp);
+        }
+        resolve(Array.from(map.values()));
+      })
+      .catch(() => resolve(posts));
+  });
+}
+
+// —— 用预取顺序排序（只重排“已加载的帖子”，不触碰 gap/哨兵） ——
+function sortByPrefetchOrder(discussionId, posts) {
+  if (!discussionId || !Array.isArray(posts) || posts.length === 0) return null;
+
+  // 至少命中一条映射；完全缺失则返回 null 让上游走回退
+  const hit = posts.some((p) => getOrderIndex(discussionId, p.id && p.id()) != null);
+  if (!hit) return null;
+
+  const list = posts.slice();
+  list.sort((a, b) => {
+    const aid = a && a.id && a.id();
+    const bid = b && b.id && b.id();
+    const ao = getOrderIndex(discussionId, aid);
+    const bo = getOrderIndex(discussionId, bid);
+
+    if (ao != null || bo != null) {
+      if (ao == null && bo == null) return 0;
+      if (ao == null) return 1;
+      if (bo == null) return -1;
+      if (ao !== bo) return ao - bo;
+    }
+
+    // 两者都没有映射：保持相对顺序（稳定排序）
+    return 0;
+  });
+
+  return list;
+}
+
+// —— 维持原数组长度（分页位）——不足用 null 填充 ——
+function padNullsToLength(arr, targetLen) {
+  const result = Array.isArray(arr) ? arr.slice() : [];
+  const need = Math.max(0, targetLen - result.length);
+  for (let i = 0; i < need; i++) result.push(null);
+  return result;
+}
+
+// ---- 父/子回退加载 -------------------------------------------------
+function ensureParentsLoaded(postStream, posts) {
+  if (typeof loadMissingParentPosts === 'function') {
+    const ctx = postStream.discussion ? postStream : { discussion: postStream.stream.discussion };
+    return loadMissingParentPosts(ctx, posts).catch(() => fallbackLoadParents(posts));
+  }
+  return fallbackLoadParents(posts);
+}
+
+function ensureMinimalChildren(postStream, posts) {
+  if (typeof loadMinimalChildren === 'function') {
+    const ctx = postStream.discussion ? postStream : { discussion: postStream.stream.discussion };
+    return loadMinimalChildren(ctx, posts).catch(() => posts);
+  }
+  return Promise.resolve(posts);
+}
+
+function fallbackLoadParents(currentPosts) {
+  const byId = new Map(currentPosts.filter(Boolean).map((p) => [String(p.id()), p]));
+  const missing = [];
+  currentPosts.forEach((p) => {
+    const pid = p && p.attribute ? p.attribute('parent_id') : null;
+    if (pid && !byId.has(String(pid))) missing.push(String(pid));
+  });
+  if (missing.length === 0) return Promise.resolve(currentPosts);
+
+  return app.store
+    .find('posts', { filter: { id: missing.join(',') } })
+    .then((loaded) => fallbackLoadParents([...currentPosts, ...loaded]))
+    .catch(() => currentPosts);
+}
+
+// ---- 导出工具 ------------------------------------------------------
+export function getThreadedPostsCache() { return reorderedPostsCache; }
+
+export function forceRebuildCache(postStream) {
+  reorderedPostsCache = null;
+  clearThreadDepthCache();
+  if (!streamBusy(postStream && postStream.stream)) buildCacheWithPrefetch(postStream);
+}
+
+export function isThreadingActive() { return !!(reorderedPostsCache && originalPostsMethod); }
+
 export function getThreadingStats() {
-  return { hasOrderMap: !!orderMap, building, discussionId: currentDiscussionId };
+  return {
+    hasCachedPosts: !!reorderedPostsCache,
+    cachedPostCount: reorderedPostsCache ? reorderedPostsCache.filter(Boolean).length : 0,
+    isReordering,
+    lastPostCount,
+    hasOriginalMethod: !!originalPostsMethod,
+    discussionId: currentDiscussionId,
+  };
 }
 
 function resetState(discussionId) {
-  currentDiscussionId = discussionId || null;
-  orderMap = null;
-  building = false;
-  lastLoadedPostIds = '';
+  currentDiscussionId = discussionId;
+  isReordering = false;
+  reorderedPostsCache = null;
+  lastPostCount = 0;
+  originalPostsMethod = null;
   clearThreadDepthCache();
 }
