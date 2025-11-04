@@ -1,4 +1,3 @@
-// js/src/forum/utils/ThreadOrderPrefetch.js
 /**
  * 轻量顺序预取：/discussions/:id/threads-order
  * 提供：
@@ -9,7 +8,7 @@
  *
  * 行为：
  *  - 预取成功后触发：window.dispatchEvent(new CustomEvent('threadify:orderReady', { detail:Number(did) }))
- *  - 失败也将 ready 置为 true，避免重复打爆接口（map 为空则自然回退到本地线程顺序）
+ *  - 失败也将 ready 置为 true（空映射），避免重复打爆接口
  */
 
 import app from 'flarum/forum/app';
@@ -58,8 +57,7 @@ export function prefetchThreadOrder(discussionId) {
     })
     .catch((e) => {
       console.warn('[Threadify] order prefetch failed:', e);
-      // 标记完成以免风暴；map 为空则排序回退到本地线程顺序
-      entry.ready = true;
+      entry.ready = true; // 标记完成以免风暴；map 为空，排序自然回退到本地线程顺序
     });
 
   return entry.ready;
