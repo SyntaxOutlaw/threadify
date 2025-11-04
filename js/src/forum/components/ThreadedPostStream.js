@@ -1,71 +1,91 @@
 // js/src/forum/components/ThreadedPostStream.js
+// -------------------------------------------------------------
+// Threaded PostStream Component (stable, no first-frame reorder)
+// 修复重点：
+// 1) 分页加载（loading*）期间严禁改动 posts 顺序，避免 anchorScroll 锚点丢失。
+// 2) 不使用 null 作为占位，改为 undefined，避免 Mithril 读取 vnode.tag 报错。
+// 3) 预取/改排完成后的 redraw 仅在非加载期触发，减少与 anchorScroll 竞争。
+// -------------------------------------------------------------
+
+
 import app from 'flarum/forum/app';
-import { extend, override } from 'flarum/common/extend';
-import PostStreamState from 'flarum/forum/states/PostStreamState';
+import { extend } from 'flarum/common/extend';
 import PostStream from 'flarum/forum/components/PostStream';
+import PostStreamState from 'flarum/forum/states/PostStreamState';
 
-import { prefetchThreadOrder, getOrderIndex } from '../utils/ThreadOrderPrefetch';
 
-/**
- * 仅做“可见列表”层面的稳定排序：
- * - 不覆盖 this.stream.posts（保留楼层号/分页锚点的不变量）
- * - 不在分页进行中排序，避免 anchorScroll 取不到锚点
- * - 返回新数组，不原地 sort
- */
+import { createThreadedPosts } from '../utils/ThreadTree';
+import { clearThreadDepthCache } from '../utils/ThreadDepth';
+import { loadMissingParentPosts, loadMinimalChildren } from '../utils/PostLoader';
+import { getOrderIndex, prefetchThreadOrder } from '../utils/ThreadOrderPrefetch';
 
-let pagingDepth = 0; // >0 表示正在分页装载（上一页/下一页）
 
+// ----- 模块级状态 -----
+let isReordering = false;
+let reorderedPostsCache = null; // 线程化后的 posts（含 undefined 占位）
+let lastPostCount = 0;
+let originalPostsMethod = null; // 保存 PostStream 的原始 posts()
+let currentDiscussionId = null;
+let threadedOrder = null; // Map<postId, order>
+let enableMinimalChildLoading = true;
+
+
+// 工具：判断 PostStreamState 是否处于加载中（上一页/下一页/邻近锚点）
+function isStreamBusy(state) {
+if (!state) return false;
+try {
+return Object.keys(state).some((k) => /^loading/i.test(k) && !!state[k]);
+} catch (e) {
+return !!(state.loadingPrevious || state.loadingNext || state.loadingNear || state.loading);
+}
+}
+
+
+// ===================================================================
+// 初始化：挂接 PostStream 生命周期 & PostStreamState.visiblePosts
+// ===================================================================
 export function initThreadedPostStream() {
-  // 讨论切换时，尝试预取顺序（极轻量）
-  extend(PostStream.prototype, 'oninit', function () {
-    const did = this.stream && this.stream.discussion && this.stream.discussion.id();
-    if (did) prefetchThreadOrder(did);
-  });
+// 首次初始化 & 讨论切换
+extend(PostStream.prototype, 'oninit', function () {
+const did = this.stream.discussion && this.stream.discussion.id && this.stream.discussion.id();
+if (currentDiscussionId !== did) resetState(did);
 
-  // 包一层：分页开始/结束时标记状态
-  override(PostStreamState.prototype, '_loadPrevious', function (original, ...args) {
-    pagingDepth++;
-    const p = original(...args);
-    return Promise.resolve(p).finally(() => {
-      pagingDepth = Math.max(0, pagingDepth - 1);
-    });
-  });
 
-  override(PostStreamState.prototype, '_loadNext', function (original, ...args) {
-    pagingDepth++;
-    const p = original(...args);
-    return Promise.resolve(p).finally(() => {
-      pagingDepth = Math.max(0, pagingDepth - 1);
-    });
-  });
+if (!originalPostsMethod) originalPostsMethod = this.stream.posts;
 
-  // 只对“可见列表”排序；分页时直接返回原结果
-  extend(PostStreamState.prototype, 'visiblePosts', function (result) {
-    if (!Array.isArray(result) || result.length <= 1) return result;
-    if (pagingDepth > 0) return result; // 正在分页，避免打断锚点
 
-    const did = this.discussion && this.discussion.id && this.discussion.id();
+// 预取讨论的线程顺序（payload 很小）
+if (did) prefetchThreadOrder(did);
 
-    // 复制一份，保持纯函数
-    const out = result.slice();
 
-    // 使用预取顺序排序；没有顺序信息时保持原相对顺序
-    out.sort((a, b) => {
-      const aid = a && a.id ? a.id() : null;
-      const bid = b && b.id ? b.id() : null;
-      if (!aid || !bid) return 0;
+// 覆写 posts：加载期返回原始顺序，否则若有缓存则返回缓存
+this.stream.posts = () => {
+if (isStreamBusy(this.stream)) {
+return (originalPostsMethod && originalPostsMethod.call(this.stream)) || [];
+}
+if (reorderedPostsCache) return reorderedPostsCache;
 
-      const ao = getOrderIndex(did, aid);
-      const bo = getOrderIndex(did, bid);
 
-      if (ao == null && bo == null) return 0; // 两个都没有记录：不动
-      if (ao == null) return 1;               // 有记录的优先
-      if (bo == null) return -1;
+const original = (originalPostsMethod && originalPostsMethod.call(this.stream)) || [];
+if (!isReordering && original.filter(Boolean).length > 0) {
+updateReorderedCache(this /* first kick */);
+}
+return original;
+};
 
-      // 都有记录：按 threads-order 升序
-      return ao - bo;
-    });
 
-    return out;
-  });
+// 记录首屏帖子数，并尝试异步构建缓存
+const cur = (originalPostsMethod && originalPostsMethod.call(this.stream)) || [];
+lastPostCount = cur.filter(Boolean).length;
+if (lastPostCount > 0) updateReorderedCache(this);
+});
+
+
+// “可见列表”排序：只在不加载时、且两边都是 Post 时才比较
+extend(PostStreamState.prototype, 'visiblePosts', function (result) {
+if (!Array.isArray(result) || result.length <= 1) return result;
+
+
+// 正在加载上一页/下一页/附近锚点时，不做任何重排，避免 anchorScroll 取不到 DOM
+if (isStreamBusy(this)) return result;
 }
