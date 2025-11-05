@@ -1,32 +1,42 @@
-// “Flex 排序模式”：不改 PostStream 的 posts() 顺序；
-// 仅在 DOM 层对每个 .PostStream-item[data-id] 设置 CSS order，
-// 并据预取的深度为其内部 article.Post 打上 thread-depth-* 类名。
-// 分页（_loadPrevious/_loadNext）时自动暂停应用，结束后再批量应用。
-// 新回复出现时自动刷新预取并重排。
-// 附带“轻门帘”：预取未就绪时把 Post 容器临时设为透明，避免短暂未排序闪动。
+// js/src/forum/utils/FlexOrderMode.js
+//
+// “DOM 物理重排模式”（推荐）：
+// - 不修改 PostStream 的 posts() 数组；也不写任何 flex/order CSS；
+// - 仅在 DOM 层，按 /threads-order 的顺序，把 .PostStream-item[data-id] 重新 insertBefore；
+// - 只移动“真实楼层”节点，跳过输入框、typing 指示、加载更多等非帖子节点；
+// - 有分页/实时新增时通过 MutationObserver 与 onupdate 触发重排；
+// - 不阻断首帧：如果 threads-order 先到则立刻应用，否则也保持时间顺序渲染，待到就绪再在下一帧重排。
+// -----------------------------------------------------------------------------
 
 import { extend, override } from 'flarum/common/extend';
 import PostStream from 'flarum/forum/components/PostStream';
 import PostStreamState from 'flarum/forum/states/PostStreamState';
-import { prefetchThreadOrder, getOrderIndex, getDepthPrefetched } from './ThreadOrderPrefetch';
+
+// 依赖轻量预取：已在你项目中替换为可用版本
+import {
+  prefetchThreadOrder,
+  waitOrderMap,
+  hasFreshOrder,
+  invalidateThreadOrder,
+  getCachedOrderMap,
+  getDepthPrefetched,
+} from '../utils/ThreadOrderPrefetch';
 
 let suspendApply = false;       // 分页期间暂停应用
 let pendingApply = false;       // 分页结束后补一次
-let currentDiscussionId = null; // 追踪当前讨论
-let scheduled = null;           // RAF 调度句柄
-let seenIds = new Set();        // 已见帖子 ID（用来侦测“新回复”）
-
-// 轻门帘延时（毫秒）：预取若很快完成，则始终无闪动；超过这个时间也会自动显示
-const VEIL_MAX_WAIT = 180;
+let scheduled = 0;              // rAF 句柄
+let observer = null;            // MutationObserver
+let lastDid = null;             // 当前讨论 id
+let lastSig = '';               // 上次已应用的顺序签名（避免重复重排）
 
 export function installFlexOrderMode() {
-  // 分页前后切换“暂停标志”
+  // --- Hook 分页：加载前暂停，加载后再应用 ---
   override(PostStreamState.prototype, '_loadPrevious', function (original, ...args) {
     suspendApply = true;
     const p = original(...args);
     return Promise.resolve(p).finally(() => {
       suspendApply = false;
-      if (pendingApply) { pendingApply = false; applySoonFromState(this); }
+      if (pendingApply) { pendingApply = false; scheduleApplyDOM(); }
     });
   });
 
@@ -35,177 +45,231 @@ export function installFlexOrderMode() {
     const p = original(...args);
     return Promise.resolve(p).finally(() => {
       suspendApply = false;
-      if (pendingApply) { pendingApply = false; applySoonFromState(this); }
+      if (pendingApply) { pendingApply = false; scheduleApplyDOM(); }
     });
   });
 
-  // PostStream 生命周期：首次创建与后续更新都尝试应用
+  // --- 生命周期：创建/更新/移除 ---
   extend(PostStream.prototype, 'oncreate', function () {
-    const did = this.stream && this.stream.discussion && this.stream.discussion.id();
-    if (currentDiscussionId !== did) {
-      currentDiscussionId = did;
-      seenIds.clear();
+    const did = getDidFromUrl();
+    lastDid = did || null;
+
+    // 预取（不阻断首帧，但数据到达后会触发一次）
+    if (did) prefetchThreadOrder(did);
+
+    // 监听 DOM 变化（实时新帖、分页渲染等）
+    const container = getContainer();
+    if (container) {
+      attachObserver(container);
     }
-    // 轻门帘：预取很快的话看不到；慢了最多 VEIL_MAX_WAIT ms
-    tryVeilUntilOrderReady(this, did);
-    scheduleApply(this);
+
+    // 首次排一下（若预取已到）
+    scheduleApplyDOM();
   });
 
   extend(PostStream.prototype, 'onupdate', function () {
-    // 发现“新帖子” → 触发一次预取刷新后再应用
-    const did = this.stream && this.stream.discussion && this.stream.discussion.id();
-    const idsNow = collectIds(this.element);
-    let hasNew = false;
-    idsNow.forEach((id) => {
-      if (!seenIds.has(id)) { hasNew = true; seenIds.add(id); }
-    });
-    if (hasNew && did) {
-      prefetchThreadOrder(did, { force: true }).finally(() => scheduleApply(this));
-    } else {
-      scheduleApply(this);
-    }
+    // 有新节点出现或位置变动：排一下
+    scheduleApplyDOM();
   });
 
-  // 当预取完成时（任意来源触发），如果正处在相同讨论页，则立即应用
+  extend(PostStream.prototype, 'onremove', function () {
+    detachObserver();
+    lastSig = '';
+  });
+
+  // --- 预取完成事件：threads-order ready 就排 ---
   window.addEventListener('threadify:order-ready', (ev) => {
-    const didReady = ev && ev.detail && ev.detail.discussionId;
+    const didReady = ev?.detail?.discussionId;
     if (!didReady) return;
-    const ps = findActivePostStream();
-    if (!ps) return;
-    const did = ps.stream && ps.stream.discussion && ps.stream.discussion.id();
-    if (Number(did) === Number(didReady)) scheduleApply(ps);
+    if (Number(didReady) !== Number(getDidFromUrl())) return;
+    scheduleApplyDOM();
+  });
+
+  // --- 浏览器前进后退 ---
+  window.addEventListener('popstate', () => {
+    // 讨论切换：重置并尝试预取
+    lastSig = '';
+    const did = getDidFromUrl();
+    lastDid = did || null;
+    if (did) prefetchThreadOrder(did);
+    scheduleApplyDOM();
   });
 }
 
-// ============ 内部：应用顺序与深度类名（DOM 层） ============
+// ============ DOM 重排主流程 ============
 
-function scheduleApply(postStream) {
+function scheduleApplyDOM() {
   if (suspendApply) { pendingApply = true; return; }
   if (scheduled) cancelAnimationFrame(scheduled);
-  scheduled = requestAnimationFrame(() => {
+  scheduled = requestAnimationFrame(async () => {
     try {
-      applyFlexOrder(postStream);
+      const did = getDidFromUrl();
+      if (!did) return;
+
+      // 没缓存或过期 -> 异步等待，一旦有数据立刻排
+      if (!hasFreshOrder(did)) {
+        await waitOrderMap(did);
+      }
+
+      const container = getContainer();
+      if (!container) return;
+
+      // 采集“真实楼层”节点区间（跳过非帖子节点）
+      const { posts, leftIdx, rightIdx, anchorAfterRange } = collectPostItems(container);
+      if (!posts.length) return;
+
+      // 生成排序后的目标序列
+      const sorted = sortByPrefetchedOrder(did, posts);
+
+      // 如果已是目标序列，略过
+      if (isSameOrder(posts, sorted)) return;
+
+      // 物理重排：逐个 insertBefore 到“帖子段落之后”的锚点之前
+      for (const el of sorted) {
+        container.insertBefore(el, anchorAfterRange);
+      }
+
+      // 记录签名，避免重复
+      lastSig = signatureOf(sorted);
+
+      // 可选：为每条帖的 article.Post 添加 thread-depth-* 类（仅视觉用途，不影响 Scrubber）
+      tryApplyDepthClasses(did, sorted);
     } catch (e) {
-      console.warn('[Threadify] flex apply failed:', e);
+      console.warn('[Threadify] DOM reorder failed:', e);
     }
   });
 }
 
-function applySoonFromState(state) {
-  // state 是 PostStreamState；拿到对应的 PostStream 实例
-  const ps = state.discussion && state.discussion.postStream ? state.discussion.postStream : null;
-  if (ps) scheduleApply(ps);
+// ============ 辅助：容器/帖子节点收集 ============
+
+function getContainer() {
+  // PostStream 根本身即 .PostStream
+  const root = document.querySelector('.PostStream');
+  return root || null;
 }
 
-function applyFlexOrder(postStream) {
-  const root = postStream && postStream.element;
-  if (!root) return;
+function collectPostItems(container) {
+  const kids = Array.from(container.children || []);
+  const isRealPost = (el) =>
+    el && el.nodeType === 1 &&
+    el.classList?.contains('PostStream-item') &&
+    el.hasAttribute('data-id'); // 必须有 data-id 才是“真实楼层”
 
-  // 找到 Post 容器（.PostStream）并加上 flex 类
-  const container = queryPostContainer(root);
-  if (!container) return;
-  container.classList.add('threadify-flex');
+  let left = -1, right = -1;
+  for (let i = 0; i < kids.length; i++) {
+    if (isRealPost(kids[i])) { left = i; break; }
+  }
+  if (left >= 0) {
+    for (let j = kids.length - 1; j >= left; j--) {
+      if (isRealPost(kids[j])) { right = j; break; }
+    }
+  }
+  const posts = (left >= 0 && right >= left)
+    ? kids.slice(left, right + 1).filter(isRealPost)
+    : [];
 
-  const did = postStream.stream && postStream.stream.discussion && postStream.stream.discussion.id();
+  // “帖子段”的第一个非帖子兄弟作为锚点（插入到它之前）
+  const anchorAfterRange = kids[right + 1] || null;
 
-  // ① 先把“非帖子子项”拉到底（TypingUsers / 无 data-id 的占位项）
-  container.querySelectorAll('.TypingUsersContainer, .PostStream-item:not([data-id])')
-    .forEach(el => { el.style.order = '2147483600'; });
+  return { posts, leftIdx: left, rightIdx: right, anchorAfterRange };
+}
 
-  // ② 正式给帖子排序：真正的 flex 子项是 .PostStream-item[data-id]
-  const items = Array.from(container.querySelectorAll('.PostStream-item[data-id]'));
+// ============ 排序与 class 标记 ============
 
-  // 更新 seenIds
-  items.forEach((n) => { const id = Number(n.getAttribute('data-id')); if (Number.isFinite(id)) seenIds.add(id); });
+function sortByPrefetchedOrder(did, posts) {
+  const BIG = 10_000_000;
+  const map = getCachedOrderMap(did) || new Map();
 
-  items.forEach((item) => {
-    const id = Number(item.getAttribute('data-id'));
-    if (!Number.isFinite(id)) return;
+  const arr = posts.slice(); // 拷贝
+  arr.sort((a, b) => {
+    const ida = +a.dataset.id;
+    const idb = +b.dataset.id;
+    const oa = map.get(ida)?.order ?? (BIG + ida);
+    const ob = map.get(idb)?.order ?? (BIG + idb);
+    if (oa === ob) return ida - idb; // 稳定次序
+    return oa - ob;
+  });
+  return arr;
+}
 
-    const order = getOrderIndex(did, id);
-    const ord = Number.isInteger(order) ? order : 10_000_000 + id; // 未命中顺序给很靠后 fallback
-    item.style.order = String(ord);
+function isSameOrder(a, b) {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
 
-    // 深度类：打在内部 article.Post 上（更合理）
-    const article = item.querySelector('article.Post');
-    if (article) {
-      cleanupDepthClasses(article);
-      const depth = getDepthPrefetched(did, id);
-      if (Number.isFinite(depth) && depth > 0) {
-        article.classList.add('threaded-post', `thread-depth-${Math.min(depth, 10)}`);
-        if (depth >= 3) article.classList.add('thread-deep');
-        if (depth >= 5) article.classList.add('thread-very-deep');
-      } else {
-        article.classList.add('thread-root');
+function signatureOf(nodes) {
+  try {
+    return nodes.map((n) => n.dataset.id).join(',');
+  } catch {
+    return '';
+  }
+}
+
+function tryApplyDepthClasses(did, postItems) {
+  // 为每个 PostStream-item 下的 article.Post 添加 thread-depth-* 类，仅用于视觉缩进
+  for (const item of postItems) {
+    const id = +item.dataset.id;
+    const article = item.querySelector && item.querySelector('article.Post');
+    if (!article) continue;
+
+    // 清理旧类
+    const toRemove = [];
+    article.classList.forEach((c) => {
+      if (
+        c.indexOf('thread-depth-') === 0 ||
+        c === 'threaded-post' || c === 'thread-root' ||
+        c === 'thread-deep' || c === 'thread-very-deep'
+      ) toRemove.push(c);
+    });
+    toRemove.forEach((c) => article.classList.remove(c));
+
+    const depth = getDepthPrefetched(did, id) ?? 0;
+    if (depth > 0) {
+      article.classList.add('threaded-post', `thread-depth-${Math.min(depth, 10)}`);
+      if (depth >= 3) article.classList.add('thread-deep');
+      if (depth >= 5) article.classList.add('thread-very-deep');
+    } else {
+      article.classList.add('thread-root');
+    }
+  }
+}
+
+// ============ Observer ============
+
+function attachObserver(container) {
+  detachObserver();
+  observer = new MutationObserver((mut) => {
+    // 有帖子节点增删时，再排一次（下一帧）
+    let touch = false;
+    for (const m of mut) {
+      if (m.type === 'childList' && (m.addedNodes.length || m.removedNodes.length)) {
+        touch = true; break;
       }
     }
+    if (touch) scheduleApplyDOM();
   });
+  observer.observe(container, { childList: true });
 }
 
-// ============ 工具函数 ============
-
-function queryPostContainer(rootEl) {
-  if (!rootEl) return null;
-  if (rootEl.classList && (rootEl.classList.contains('PostStream') || rootEl.matches('.PostStream'))) return rootEl;
-  return rootEl.querySelector('.PostStream') || rootEl.querySelector('.DiscussionPage-list') || rootEl;
+function detachObserver() {
+  if (observer) {
+    try { observer.disconnect(); } catch {}
+    observer = null;
+  }
 }
 
-function cleanupDepthClasses(node) {
-  const toRemove = [];
-  node.classList.forEach((c) => {
-    if (
-      c.indexOf('thread-depth-') === 0 ||
-      c === 'threaded-post' ||
-      c === 'thread-deep' ||
-      c === 'thread-very-deep' ||
-      c === 'thread-root'
-    ) {
-      toRemove.push(c);
-    }
-  });
-  toRemove.forEach((c) => node.classList.remove(c));
-}
+// ============ 工具：获取讨论 id ============
 
-function collectIds(root) {
-  const out = new Set();
-  if (!root) return out;
-  root.querySelectorAll('.PostStream-item[data-id]').forEach((n) => {
-    const id = Number(n.getAttribute('data-id'));
-    if (Number.isFinite(id)) out.add(id);
-  });
-  return out;
-}
-
-function findActivePostStream() {
-  const disc = app.current && app.current.get && app.current.get('discussion');
-  if (disc && disc.postStream) return disc.postStream;
+function getDidFromUrl() {
+  // 支持 /d/:id 或 /d/:id/:postNumber 或 /d/:id-:slug
+  const segs = (location.pathname || '').split('/').filter(Boolean);
+  const i = segs.indexOf('d');
+  if (i >= 0 && segs[i + 1]) {
+    const m = segs[i + 1].match(/^(\d+)/);
+    if (m) return Number(m[1]);
+  }
   return null;
-}
-
-// ============ 轻门帘：避免预取未就绪的短闪动 ============
-
-function tryVeilUntilOrderReady(postStream, did) {
-  if (!did) return;
-
-  const root = postStream && postStream.element;
-  const container = queryPostContainer(root);
-  if (!container) return;
-
-  let unveiled = false;
-
-  const unveil = () => {
-    if (unveiled) return;
-    unveiled = true;
-    container.style.transition = 'opacity 90ms ease';
-    container.style.opacity = '1';
-  };
-
-  // 先拉低透明度，预取很快的话看不到闪动；否则最多 VEIL_MAX_WAIT ms
-  container.style.opacity = '0';
-  // 开始预取
-  const fallback = setTimeout(unveil, VEIL_MAX_WAIT);
-  prefetchThreadOrder(did).finally(() => {
-    clearTimeout(fallback);
-    unveil();
-  });
 }
