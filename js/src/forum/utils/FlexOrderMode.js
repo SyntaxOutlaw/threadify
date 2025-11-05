@@ -6,7 +6,7 @@
 //   - getOrderIndex(did, postId)
 //   - getDepthPrefetched(did, postId)
 //
-// 不使用任何额外导出，避免“导出不匹配”导致整个模块失效。
+// 关键修复：监听 'threadify:order-ready' 事件，预取完成后立即再跑一次排序。
 // -----------------------------------------------------------------------------
 
 import { extend, override } from 'flarum/common/extend';
@@ -18,11 +18,11 @@ import {
   getDepthPrefetched,
 } from '../utils/ThreadOrderPrefetch';
 
-let suspendApply = false;     // 分页期间暂停应用
-let pendingApply = false;     // 分页结束后补一次
-let rafId = 0;                // rAF 句柄
-let mo = null;                // MutationObserver
-let lastSig = '';             // 上次应用的序列签名
+let suspendApply = false; // 分页期间暂停应用
+let pendingApply = false; // 分页结束后补一次
+let rafId = 0;            // rAF 句柄
+let mo = null;            // MutationObserver
+let lastSig = '';         // 上次应用的序列签名
 
 export function installFlexOrderMode() {
   // 分页 hook：加载期间暂停排序，加载后补一次
@@ -70,6 +70,14 @@ export function installFlexOrderMode() {
     const did = getDid();
     if (did) prefetchThreadOrder(did).finally(() => scheduleApply());
     else scheduleApply();
+  });
+
+  // ⭐ 关键：预取完成事件 -> 立刻再排一次（不需要额外导出）
+  window.addEventListener('threadify:order-ready', (ev) => {
+    const didReady = ev?.detail?.discussionId;
+    const didNow = getDid();
+    if (!didReady || !didNow || Number(didReady) !== Number(didNow)) return;
+    scheduleApply();
   });
 }
 
