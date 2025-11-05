@@ -1,14 +1,15 @@
-// 不改变 PostStream.posts() 也不使用 CSS order；
-// 仅在 DOM 中“物理挪动” .PostStream-item[data-id] 节点，
-// 保留顶部/底部的非帖子项（加载更多、输入框等）原位，
-// 并用 MutationObserver 监听 Realtime/分页变化后 1 帧自动重排。
+// js/src/forum/utils/DomReorderMode.js
+// 物理重排 .PostStream-item[data-id]，保持 Scrubber/地址栏楼层号正常。
+// 监听分页与 Realtime 变化，在下一帧按 /threads-order 顺序 insertBefore。
+// 若发现新帖不在缓存顺序表中，会强制刷新一次顺序表再排序。
 
 import { extend } from 'flarum/common/extend';
 import PostStream from 'flarum/forum/components/PostStream';
 
 const BIG = 10_000_000;
+const TTL_MS = 10_000; // 顺序表缓存 10s
 
-function getDiscussionIdFromComponent(ps) {
+function getDidFromComponent(ps) {
   try {
     return ps?.stream?.discussion?.id?.() ?? null;
   } catch {
@@ -17,33 +18,50 @@ function getDiscussionIdFromComponent(ps) {
 }
 
 function getContainer(ps) {
-  return ps?.element?.querySelector?.('.PostStream') || null;
-}
-
-function collectChildren(container) {
-  return Array.from(container.children || []);
+  // 1) 根就是 .PostStream
+  if (ps?.element && ps.element.classList && ps.element.classList.contains('PostStream')) {
+    return ps.element;
+  }
+  // 2) 向下找
+  const found = ps?.element?.querySelector?.('.PostStream');
+  if (found) return found;
+  // 3) 兜底：全局找（极端情况下）
+  return document.querySelector('.PostStream') || null;
 }
 
 function isPostItem(el) {
-  return el && el.matches && el.matches('.PostStream-item[data-id]');
+  return el && el.nodeType === 1 && el.matches('.PostStream-item[data-id]');
 }
 
-// ---- 轻量缓存：did -> { promise, map }
+function collectChildren(container) {
+  return Array.from(container?.children || []);
+}
+
+// ---- 轻量顺序缓存：did -> { ts, map (Map<postId,{order,depth,parentId}>), promise }
 const orderCache = new Map();
 
-function ensureOrderMap(did) {
+function ensureOrderMap(did, { force = false } = {}) {
   const key = String(did);
+  const now = Date.now();
   const cached = orderCache.get(key);
-  if (cached?.map) return Promise.resolve(cached.map);
-  if (cached?.promise) return cached.promise.then((e) => e.map);
 
-  const holder = { promise: null, map: null };
+  if (!force && cached) {
+    // 命中有效缓存
+    if (cached.map && now - (cached.ts || 0) < TTL_MS) {
+      return Promise.resolve(cached.map);
+    }
+    // 已有在飞中的请求
+    if (cached.promise) return cached.promise.then((h) => h.map);
+  }
+
+  const holder = cached || { ts: 0, map: null, promise: null };
   orderCache.set(key, holder);
 
-  holder.promise = app.request({
-    method: 'GET',
-    url: `${app.forum.attribute('apiUrl')}/discussions/${did}/threads-order`,
-  })
+  holder.promise = app
+    .request({
+      method: 'GET',
+      url: `${app.forum.attribute('apiUrl')}/discussions/${did}/threads-order?bust=${now}`,
+    })
     .then((res) => {
       const map = new Map();
       (res.order || []).forEach(({ postId, order, depth, parentPostId }) => {
@@ -54,32 +72,23 @@ function ensureOrderMap(did) {
         });
       });
       holder.map = map;
+      holder.ts = Date.now();
       return holder;
     })
     .catch((e) => {
       console.warn('[Threadify] threads-order fetch failed', e);
-      holder.map = new Map(); // 失败时给空图，返回原序
+      // 失败给空表，至少不阻塞渲染
+      holder.map = holder.map || new Map();
+      holder.ts = Date.now();
       return holder;
     });
 
-  return holder.promise.then((e) => e.map);
+  return holder.promise.then((h) => h.map);
 }
 
-function reorderDOM(container, orderMap) {
-  const kids = collectChildren(container);
-  if (!kids.length) return;
-
-  // 中间“帖子段” [L, R]，两端的非帖子项保持原位
-  let L = kids.findIndex(isPostItem);
-  let R = kids.length - 1 - [...kids].reverse().findIndex(isPostItem);
-  if (L === -1 || R === -1 || L > R) return;
-
-  const mid = kids.slice(L, R + 1);
-  const posts = mid.filter(isPostItem);
-  if (!posts.length) return;
-
-  // 目标顺序：threads-order 再按 id 稳定
-  const sorted = posts.slice().sort((a, b) => {
+function sortPostsByMap(did, posts, orderMap) {
+  const arr = posts.slice();
+  arr.sort((a, b) => {
     const ida = Number(a.dataset.id);
     const idb = Number(b.dataset.id);
     const ra = orderMap.get(ida);
@@ -88,36 +97,73 @@ function reorderDOM(container, orderMap) {
     const ob = rb ? rb.order : BIG + idb;
     return oa === ob ? ida - idb : oa - ob;
   });
+  return arr;
+}
 
-  // 已经是正确顺序则不动
-  let already = true;
-  for (let i = 0; i < posts.length; i++) {
-    if (posts[i] !== sorted[i]) { already = false; break; }
+function sameOrder(a, b) {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+function signature(nodes) {
+  try {
+    return nodes.map((n) => n.dataset.id).join(',');
+  } catch {
+    return '';
   }
-  if (already) return;
+}
 
-  // 插入锚点：以“底部段首个节点”为锚（不存在则为 null = 末尾）
-  const anchor = kids[R + 1] || null;
+function findPostsRange(container) {
+  const kids = collectChildren(container);
+  if (!kids.length) return { posts: [], left: -1, right: -1, anchor: null };
 
-  // 物理重排：只移动帖子段内部元素
+  let L = kids.findIndex(isPostItem);
+  if (L < 0) return { posts: [], left: -1, right: -1, anchor: kids[0] || null };
+
+  let R = kids.length - 1 - [...kids].reverse().findIndex(isPostItem);
+  if (R < L) R = L;
+
+  const posts = kids.slice(L, R + 1).filter(isPostItem);
+  const anchor = kids[R + 1] || null; // 在“帖子段”之后的第一个兄弟之前插入
+  return { posts, left: L, right: R, anchor };
+}
+
+// 如果发现有帖子不在顺序表中，强刷一次再排（只强刷一遍防止抖动）
+async function reorderDOM(container, did, orderMap) {
+  const { posts, anchor } = findPostsRange(container);
+  if (!posts.length) return;
+
+  // 缺漏检测
+  const missing = posts.some((el) => !orderMap.has(Number(el.dataset.id)));
+  if (missing) {
+    const fresh = await ensureOrderMap(did, { force: true });
+    // 二次排序（不再递归强刷）
+    return doReorder(container, posts, anchor, fresh);
+  }
+
+  return doReorder(container, posts, anchor, orderMap);
+}
+
+function doReorder(container, posts, anchor, orderMap) {
+  const sorted = sortPostsByMap(null, posts, orderMap);
+  if (sameOrder(posts, sorted)) return;
+
   for (const el of sorted) {
     container.insertBefore(el, anchor);
   }
 }
 
 export function installDomReorderMode() {
-  // 给每个 PostStream 实例挂自己的 observer 与一次性重排
   extend(PostStream.prototype, 'oncreate', function () {
-    const did = getDiscussionIdFromComponent(this);
+    const did = getDidFromComponent(this);
     const container = getContainer(this);
     if (!did || !container) return;
 
-    // 第一次：拉取顺序并重排
-    ensureOrderMap(did).then((map) => {
-      reorderDOM(container, map);
-    });
+    // 首次：拉取并重排
+    ensureOrderMap(did).then((map) => reorderDOM(container, did, map));
 
-    // 观察子列表变化（Realtime/分页），下一帧重排
+    // 监听 Realtime/分页引起的子节点变化
     let scheduled = false;
     const observer = new MutationObserver((muts) => {
       if (!muts.some((m) => m.type === 'childList')) return;
@@ -125,7 +171,7 @@ export function installDomReorderMode() {
       scheduled = true;
       requestAnimationFrame(() => {
         scheduled = false;
-        ensureOrderMap(did).then((map) => reorderDOM(container, map));
+        ensureOrderMap(did).then((map) => reorderDOM(container, did, map));
       });
     });
 
@@ -134,16 +180,17 @@ export function installDomReorderMode() {
   });
 
   extend(PostStream.prototype, 'onupdate', function () {
-    const did = getDiscussionIdFromComponent(this);
+    const did = getDidFromComponent(this);
     const container = getContainer(this);
     if (!did || !container) return;
-    // 有时 oncreate 之后马上会有一次 patch，这里再确保一次
-    ensureOrderMap(did).then((map) => reorderDOM(container, map));
+    ensureOrderMap(did).then((map) => reorderDOM(container, did, map));
   });
 
   extend(PostStream.prototype, 'onremove', function () {
     if (this.__threadifyDomObserver) {
-      try { this.__threadifyDomObserver.disconnect(); } catch {}
+      try {
+        this.__threadifyDomObserver.disconnect();
+      } catch {}
       this.__threadifyDomObserver = null;
     }
   });
