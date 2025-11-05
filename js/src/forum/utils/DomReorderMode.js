@@ -1,13 +1,20 @@
 // js/src/forum/utils/DomReorderMode.js
-// 物理重排 .PostStream-item[data-id]，保持 Scrubber/地址栏楼层号正常。
-// 监听分页与 Realtime 变化，在下一帧按 /threads-order 顺序 insertBefore。
-// 若发现新帖不在缓存顺序表中，会强制刷新一次顺序表再排序。
+// 物理重排 .PostStream-item[data-id]（仅限当前已挂载的“同一窗口”内）
+// 目标：保证 Scrubber/地址栏楼层号正常；不跨窗口硬搬，避免被 PostStream 回收导致“消失”。
+// 依赖统一复用 ThreadOrderPrefetch 的缓存，去除本文件冗余缓存。
+// 修复：insertBefore 报错（anchor 非 container 子节点）——插入前二次校验并降级为 appendChild。
 
+import app from 'flarum/forum/app';
 import { extend } from 'flarum/common/extend';
 import PostStream from 'flarum/forum/components/PostStream';
+import {
+  waitOrderMap,
+  hasFreshOrder,
+  prefetchThreadOrder,
+} from '../utils/ThreadOrderPrefetch';
 
-const BIG = 10_000_000;
-const TTL_MS = 10_000; // 顺序表缓存 10s
+const BIG = 10_000_000; // 未收录帖子排序兜底的高权重
+const LOG_NS = '[Threadify]';
 
 function getDidFromComponent(ps) {
   try {
@@ -18,10 +25,8 @@ function getDidFromComponent(ps) {
 }
 
 function getContainer(ps) {
-  // 1) 根就是 .PostStream
-  if (ps?.element && ps.element.classList && ps.element.classList.contains('PostStream')) {
-    return ps.element;
-  }
+  // 1) 本组件根就是 .PostStream
+  if (ps?.element?.classList?.contains('PostStream')) return ps.element;
   // 2) 向下找
   const found = ps?.element?.querySelector?.('.PostStream');
   if (found) return found;
@@ -37,57 +42,8 @@ function collectChildren(container) {
   return Array.from(container?.children || []);
 }
 
-// ---- 轻量顺序缓存：did -> { ts, map (Map<postId,{order,depth,parentId}>), promise }
-const orderCache = new Map();
-
-function ensureOrderMap(did, { force = false } = {}) {
-  const key = String(did);
-  const now = Date.now();
-  const cached = orderCache.get(key);
-
-  if (!force && cached) {
-    // 命中有效缓存
-    if (cached.map && now - (cached.ts || 0) < TTL_MS) {
-      return Promise.resolve(cached.map);
-    }
-    // 已有在飞中的请求
-    if (cached.promise) return cached.promise.then((h) => h.map);
-  }
-
-  const holder = cached || { ts: 0, map: null, promise: null };
-  orderCache.set(key, holder);
-
-  holder.promise = app
-    .request({
-      method: 'GET',
-      url: `${app.forum.attribute('apiUrl')}/discussions/${did}/threads-order?bust=${now}`,
-    })
-    .then((res) => {
-      const map = new Map();
-      (res.order || []).forEach(({ postId, order, depth, parentPostId }) => {
-        map.set(Number(postId), {
-          order: Number(order),
-          depth: Number.isFinite(depth) ? Number(depth) : 0,
-          parentId: parentPostId ? Number(parentPostId) : null,
-        });
-      });
-      holder.map = map;
-      holder.ts = Date.now();
-      return holder;
-    })
-    .catch((e) => {
-      console.warn('[Threadify] threads-order fetch failed', e);
-      // 失败给空表，至少不阻塞渲染
-      holder.map = holder.map || new Map();
-      holder.ts = Date.now();
-      return holder;
-    });
-
-  return holder.promise.then((h) => h.map);
-}
-
-function sortPostsByMap(did, posts, orderMap) {
-  const arr = posts.slice();
+function sortByOrderMap(nodes, orderMap) {
+  const arr = nodes.slice();
   arr.sort((a, b) => {
     const ida = Number(a.dataset.id);
     const idb = Number(b.dataset.id);
@@ -106,14 +62,12 @@ function sameOrder(a, b) {
   return true;
 }
 
-function signature(nodes) {
-  try {
-    return nodes.map((n) => n.dataset.id).join(',');
-  } catch {
-    return '';
-  }
-}
-
+/**
+ * 取“当前容器里连续的帖子段”与其尾部之后的第一个兄弟节点（作为 anchor）。
+ * 说明：
+ * - 我们只对“当前已挂载的 DOM”做排序（= 同一窗口内重排）。
+ * - 返回的 anchor 可能在后续一帧被窗口化逻辑移除，所以插入前还要二次校验。
+ */
 function findPostsRange(container) {
   const kids = collectChildren(container);
   if (!kids.length) return { posts: [], left: -1, right: -1, anchor: null };
@@ -125,45 +79,97 @@ function findPostsRange(container) {
   if (R < L) R = L;
 
   const posts = kids.slice(L, R + 1).filter(isPostItem);
-  const anchor = kids[R + 1] || null; // 在“帖子段”之后的第一个兄弟之前插入
+  const anchor = kids[R + 1] || null; // 计划插在“帖子段”之后的第一个兄弟之前
   return { posts, left: L, right: R, anchor };
 }
 
-// 如果发现有帖子不在顺序表中，强刷一次再排（只强刷一遍防止抖动）
-async function reorderDOM(container, did, orderMap) {
+function datasetIds(nodes) {
+  try {
+    return nodes.map((n) => Number(n.dataset.id));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 仅在“同一 PostStream 容器（=当前窗口已加载）”内做 DOM 重排。
+ * 若发现当前 DOM 中存在不在顺序表里的帖子，并且缓存已不新鲜，则强刷一次。
+ */
+async function reorderWithinWindow(container, did) {
+  const firstMap = await waitOrderMap(did);
   const { posts, anchor } = findPostsRange(container);
   if (!posts.length) return;
 
-  // 缺漏检测
-  const missing = posts.some((el) => !orderMap.has(Number(el.dataset.id)));
-  if (missing) {
-    const fresh = await ensureOrderMap(did, { force: true });
-    // 二次排序（不再递归强刷）
-    return doReorder(container, posts, anchor, fresh);
+  // 检查是否存在“DOM 里有而顺序表里没有”的帖子
+  const domIds = datasetIds(posts);
+  const missing = domIds.some((id) => !firstMap.has(id));
+
+  let orderMap = firstMap;
+  if (missing && !hasFreshOrder(did)) {
+    // 强刷一次，避免排序抖动（只强刷一轮）
+    await prefetchThreadOrder(did, { force: true });
+    orderMap = await waitOrderMap(did);
   }
 
-  return doReorder(container, posts, anchor, orderMap);
+  // 只对“当前窗口已加载”的这些 posts 排序（不跨窗口搬运）
+  doSafeReorder(container, posts, anchor, orderMap);
 }
 
-function doReorder(container, posts, anchor, orderMap) {
-  const sorted = sortPostsByMap(null, posts, orderMap);
-  if (sameOrder(posts, sorted)) return;
+/**
+ * 稳健插入：插入前校验 anchor 是否仍为 container 子节点；
+ * 若 anchor 已失效，则降级为 append（等价于 insertBefore(el, null)）。
+ * 同时，逐个元素检查 el 仍在 container 中（可能已被窗口化卸载）。
+ */
+function doSafeReorder(container, posts, anchor, orderMap) {
+  if (!container) return;
+
+  // 快照，避免排序中又触发 observer 导致二次排序
+  const snapshot = posts.filter((el) => el && el.parentNode === container);
+  if (!snapshot.length) return;
+
+  const sorted = sortByOrderMap(snapshot, orderMap);
+  if (sameOrder(snapshot, sorted)) return;
+
+  const ref =
+    anchor && anchor.parentNode === container ? anchor : null;
 
   for (const el of sorted) {
-    container.insertBefore(el, anchor);
+    if (el.parentNode !== container) continue; // 已被卸载，跳过
+    try {
+      container.insertBefore(el, ref);
+    } catch (e) {
+      // 常见于 anchor/ref 在这一次循环中发生了变化；降级为 append 再试一次
+      try {
+        container.insertBefore(el, null);
+      } catch (err) {
+        // 仍失败则记录一次日志并跳过该元素
+        // 利用 threadifyLogs 开关抑制输出
+        console.warn(`${LOG_NS} insertBefore failed for #${el.dataset?.id}`, err);
+      }
+    }
   }
 }
 
+/** 安装“只在同窗内重排”的模式 */
 export function installDomReorderMode() {
   extend(PostStream.prototype, 'oncreate', function () {
     const did = getDidFromComponent(this);
     const container = getContainer(this);
     if (!did || !container) return;
 
-    // 首次：拉取并重排
-    ensureOrderMap(did).then((map) => reorderDOM(container, did, map));
+    // 控制台测试钩子：验证两帖是否“同窗”（=都在当前容器内）
+    // 用法：threadifyTest.sameWindow(94, 3580)
+    window.threadifyTest = window.threadifyTest || {};
+    window.threadifyTest.sameWindow = (a, b) => {
+      const qa = container.querySelector(`.PostStream-item[data-id="${Number(a)}"]`);
+      const qb = container.querySelector(`.PostStream-item[data-id="${Number(b)}"]`);
+      return !!(qa && qb);
+    };
 
-    // 监听 Realtime/分页引起的子节点变化
+    // 首次重排（仅对已加载的窗口）
+    reorderWithinWindow(container, did);
+
+    // 监听“窗口化加载/卸载”引起的子节点变化；合并到下一帧重排
     let scheduled = false;
     const observer = new MutationObserver((muts) => {
       if (!muts.some((m) => m.type === 'childList')) return;
@@ -171,7 +177,7 @@ export function installDomReorderMode() {
       scheduled = true;
       requestAnimationFrame(() => {
         scheduled = false;
-        ensureOrderMap(did).then((map) => reorderDOM(container, did, map));
+        reorderWithinWindow(container, did);
       });
     });
 
@@ -183,7 +189,8 @@ export function installDomReorderMode() {
     const did = getDidFromComponent(this);
     const container = getContainer(this);
     if (!did || !container) return;
-    ensureOrderMap(did).then((map) => reorderDOM(container, did, map));
+    // 更新时也做一次“同窗内重排”
+    reorderWithinWindow(container, did);
   });
 
   extend(PostStream.prototype, 'onremove', function () {
