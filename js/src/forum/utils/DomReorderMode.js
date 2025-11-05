@@ -1,9 +1,9 @@
-// js/src/forum/utils/DomReorderMode.js
 // 物理重排 .PostStream-item[data-id]，保持 Scrubber/地址栏楼层号正常。
-// ——本版在旧实现基础上改动：
-// 1) 统一改用 ThreadOrderPrefetch.waitOrderMap（删除本地缓存与直连请求）。
-// 2) 仅当“父子同窗且楼层差 ≤ 50”时才参与重排；>50 的留在原位（仍走通用缩进逻辑）。
-// 3) 插入前复核 anchor 是否仍属于容器，避免 NotFoundError；否则降级为 append。
+// —— 在旧实现基础上的修订 ——
+// 1) 统一使用 ThreadOrderPrefetch.waitOrderMap（去掉本地缓存与直连请求）。
+// 2) 仅当“父子同窗且楼层差 ≤ 50”时让「子帖」参与重排；「根帖」始终参与重排。
+// 3) 插入前复核 anchor 是否仍在容器中，避免 NotFoundError；否则降级为 append。
+// 4) sortPostsByMap 必须用当前容器（不是 document）做“同窗”判定。
 
 import app from 'flarum/forum/app';
 import { extend } from 'flarum/common/extend';
@@ -13,7 +13,7 @@ import { waitOrderMap, prefetchThreadOrder } from '../utils/ThreadOrderPrefetch'
 const BIG = 10_000_000;
 const THRESHOLD_NUMBER_GAP = 50;
 
-/** ─── helpers: discussion/container ─── */
+/** ---- helpers: discussion/container ---- */
 function getDidFromComponent(ps) {
   try {
     return ps?.stream?.discussion?.id?.() ?? null;
@@ -23,14 +23,11 @@ function getDidFromComponent(ps) {
 }
 
 function getContainer(ps) {
-  // 1) 根就是 .PostStream
   if (ps?.element && ps.element.classList && ps.element.classList.contains('PostStream')) {
     return ps.element;
   }
-  // 2) 向下找
   const found = ps?.element?.querySelector?.('.PostStream');
   if (found) return found;
-  // 3) 兜底：全局找（极端情况下）
   return document.querySelector('.PostStream') || null;
 }
 
@@ -42,13 +39,13 @@ function collectChildren(container) {
   return Array.from(container?.children || []);
 }
 
-/** ─── helpers: ids/numbers/parent ─── */
+/** ---- helpers: ids/numbers/parent ---- */
 function getPostIdFromEl(el) {
   return Number(el?.dataset?.id);
 }
 
 function getPostNumberFromEl(el) {
-  // 优先 DOM data-number；缺失则尝试 store
+  // 优先 DOM data-number；缺失则尝试从 store 读取
   const dn = el?.dataset?.number;
   if (dn != null) {
     const n = Number(dn);
@@ -72,12 +69,21 @@ function getPostNumberFromEl(el) {
   return null;
 }
 
-function getParentIdFromMap(orderMap, postId) {
+function getParentIdFromMapOrStore(orderMap, postId) {
   const rec = orderMap.get(Number(postId));
-  return rec ? rec.parentId : null;
+  if (rec) return rec.parentId; // null 表示根；number 表示有父
+  // 兜底：用 store 里的 parent_id
+  try {
+    const model = app.store.getById('posts', String(postId));
+    if (model && typeof model.attribute === 'function') {
+      const pid = model.attribute('parent_id');
+      return pid == null ? null : Number(pid);
+    }
+  } catch {}
+  return undefined; // 未知（既没 map，也没拿到 attribute）
 }
 
-/** ─── helpers: range/same-order ─── */
+/** ---- helpers: range/same-order ---- */
 function sameOrder(a, b) {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
@@ -99,26 +105,37 @@ function findPostsRange(container) {
   return { posts, left: L, right: R, anchor };
 }
 
-/** ─── 统一的顺序表获取：替代旧 ensureOrderMap，本地不再缓存 ─── */
+/** ---- 统一顺序表（替代旧 ensureOrderMap，本地不再缓存） ---- */
 function ensureOrderMap(did, { force = false } = {}) {
   if (!did) return Promise.resolve(new Map());
   if (force) {
-    // 强制刷新一次：先 prefetch(force) 再 wait
+    // 强制刷新：先 prefetch(force) 再 wait
     return prefetchThreadOrder(did, { force: true }).then(() => waitOrderMap(did));
   }
   return waitOrderMap(did);
 }
 
-/** ─── 仅同窗且父子 ≤ THRESHOLD 的参与重排，其余保留原位 ─── */
-function isEligibleForReorder(el, container, orderMap) {
+/** ---- 参与重排判定 ----
+ *  规则：
+ *   - 根帖（parentId === null）始终参与重排（让子树能贴近）。
+ *   - 有父帖：仅当「父在同窗」且「楼层差 ≤ THRESHOLD」才参与；否则保留原位。
+ *   - 未知 parent（undefined）→ 保守：不参与（保持原位）。
+ */
+function isEligibleForReorder(container, orderMap, el) {
   const selfId = getPostIdFromEl(el);
   if (!selfId) return false;
 
-  const parentId = getParentIdFromMap(orderMap, selfId);
-  if (!parentId) return false; // 无父，不参与重排（根帖保留原位）
+  const parentId = getParentIdFromMapOrStore(orderMap, selfId);
 
+  // 根帖：参与排序（关键修正）
+  if (parentId === null) return true;
+
+  // 未知：保持原位
+  if (parentId === undefined) return false;
+
+  // 有父：判同窗与 gap
   const parentEl = container.querySelector(`.PostStream-item[data-id="${parentId}"]`);
-  if (!isPostItem(parentEl)) return false; // 父不在同窗
+  if (!isPostItem(parentEl)) return false;
 
   const selfNo = getPostNumberFromEl(el);
   const parentNo = getPostNumberFromEl(parentEl);
@@ -127,15 +144,16 @@ function isEligibleForReorder(el, container, orderMap) {
   return Math.abs(selfNo - parentNo) <= THRESHOLD_NUMBER_GAP;
 }
 
-/** ─── 旧 sortPostsByMap 的保留名：改为“合并排序” ───
- * 仅对“可参与”的帖子按线程顺序排序，其它保持原位（留在原地）
+/** ---- sortPostsByMap（保留旧函数名/职责） ----
+ *  策略：仅对“可参与”的帖子按线程顺序排序，其它保持原位。
+ *  注意：这里必须使用「当前容器」做同窗判定，不能用 document。
  */
-function sortPostsByMap(_did, posts, orderMap) {
+function sortPostsByMap(container, posts, orderMap) {
   const eligible = [];
   const eligibleSet = new Set();
 
   for (const el of posts) {
-    if (isEligibleForReorder(el, document, orderMap)) {
+    if (isEligibleForReorder(container, orderMap, el)) {
       eligible.push(el);
       eligibleSet.add(el);
     }
@@ -157,59 +175,54 @@ function sortPostsByMap(_did, posts, orderMap) {
     if (eligibleSet.has(el)) {
       merged.push(sortedEligible[p++]);
     } else {
-      merged.push(el);
+      merged.push(el); // >50/父不在窗/未知parent 的，留在原位（你现有缩进样式照常）
     }
   }
   return merged;
 }
 
-/** ─── 排序与安全插入 ─── */
+/** ---- 排序与安全插入 ---- */
 function doReorder(container, posts, anchor, orderMap) {
   if (!posts.length) return;
 
-  const sorted = sortPostsByMap(null, posts, orderMap);
+  const sorted = sortPostsByMap(container, posts, orderMap);
   if (sameOrder(posts, sorted)) return;
 
-  // 插入前复核 anchor 是否仍在容器中；否则降级为 append
+  // 插入前复核 anchor 是否仍在容器；否则降级为 append
   let target = anchor;
   if (!(target && target.parentNode === container)) {
     target = null;
   }
 
   for (const el of sorted) {
-    // 在循环中也持续校验，避免目标在中途被移除
     if (target && target.parentNode !== container) target = null;
     container.insertBefore(el, target);
   }
 }
 
-/** ─── 发现缺漏时强刷一次顺序表再排（保留旧逻辑，但走统一缓存） ─── */
+/** ---- 发现缺漏时强刷一次顺序表再排（沿用旧逻辑，但走统一缓存） ---- */
 async function reorderDOM(container, did, orderMap) {
   const { posts, anchor } = findPostsRange(container);
   if (!posts.length) return;
 
-  // 缺漏检测：窗口内存在不在 orderMap 的帖子
   const missing = posts.some((el) => !orderMap.has(Number(el.dataset.id)));
   if (missing) {
     const fresh = await ensureOrderMap(did, { force: true });
-    // 二次排序（不再递归强刷）
     return doReorder(container, posts, anchor, fresh);
   }
 
   return doReorder(container, posts, anchor, orderMap);
 }
 
-/** ─── 入口：安装 DOM 重排模式 ─── */
+/** ---- 安装 DOM 重排模式 ---- */
 export function installDomReorderMode() {
   extend(PostStream.prototype, 'oncreate', function () {
     const did = getDidFromComponent(this);
     const container = getContainer(this);
     if (!did || !container) return;
 
-    // 首次获取统一顺序表并重排
     ensureOrderMap(did).then((map) => reorderDOM(container, did, map));
 
-    // 监听 Realtime/分页引起的子节点变化（仅 childList）
     let scheduled = false;
     const observer = new MutationObserver((muts) => {
       if (!muts.some((m) => m.type === 'childList')) return;
