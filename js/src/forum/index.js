@@ -3,12 +3,13 @@ import { extend } from 'flarum/common/extend';
 
 import DiscussionPage from 'flarum/forum/components/DiscussionPage';
 import DiscussionListItem from 'flarum/forum/components/DiscussionListItem';
+import PostStreamState from 'flarum/forum/states/PostStreamState';
 
 import { initThreadedPost } from './components/ThreadedPost';
 import { initThreadedReplyComposer } from './components/ThreadedReplyComposer';
 
 import { installDomReorderMode } from './utils/DomReorderMode';
-import { prefetchThreadOrder } from './utils/ThreadOrderPrefetch'; // 你已有的轻量预取，可继续用来提升首屏命中
+import { prefetchThreadOrder } from './utils/ThreadOrderPrefetch';
 
 // 可选：控制 Threadify 日志的开/关（保持你之前的实现）
 (function setupThreadifyLoggingToggle() {
@@ -57,13 +58,13 @@ import { prefetchThreadOrder } from './utils/ThreadOrderPrefetch'; // 你已有�
 })();
 
 app.initializers.add('syntaxoutlaw-threadify', () => {
-  // 1) 提交时自动带上 parent_id（你的已有逻辑）
+  // 1) 提交时自动带上 parent_id
   initThreadedReplyComposer();
 
-  // 2) 给帖子组件加深度类（可留可去；不会影响 Scrubber）
+  // 2) 给帖子组件加深度类
   initThreadedPost();
 
-  // 3) 安装“DOM 物理重排 + 观察器”模式（核心）
+  // 3) 安装“DOM 物理重排 + 观察器”模式（仅同窗且父子差≤50参与）
   installDomReorderMode();
 
   // 4) 提前预取顺序（优化首屏命中）
@@ -86,5 +87,20 @@ app.initializers.add('syntaxoutlaw-threadify', () => {
       this.element.addEventListener('touchstart', handler, { once: true, passive: true });
     }
   });
-});
 
+  // 6) 进入讨论页临时把 loadCount 设为 50，离开时恢复
+  extend(DiscussionPage.prototype, 'oninit', function () {
+    // 仅在讨论页会生效；离开页（onremove）恢复默认
+    this.__threadifyPrevLoadCount = PostStreamState.loadCount;
+    PostStreamState.loadCount = 50;
+    console.log('[Threadify] set PostStreamState.loadCount = 50 (temporary)');
+  });
+
+  extend(DiscussionPage.prototype, 'onremove', function () {
+    if (this.__threadifyPrevLoadCount != null) {
+      PostStreamState.loadCount = this.__threadifyPrevLoadCount;
+      this.__threadifyPrevLoadCount = null;
+      console.log('[Threadify] restore PostStreamState.loadCount');
+    }
+  });
+});
