@@ -1,211 +1,180 @@
 // js/src/forum/utils/DomReorderMode.js
-// 物理重排 .PostStream-item[data-id] —— 仅当“父子同窗”才参与重排；根帖永远参与。
-// 不扩大窗口；不跨窗硬搬子帖；留在原地的子帖复用通用缩进逻辑即可。
-// 修复：插入前复核 anchor 仍属同容器，避免 NotFoundError；并在无变化时跳过重排。
-// 去冗余：不再维护本地缓存，统一复用 ThreadOrderPrefetch.waitOrderMap。
+// 仅在“同窗”内重排；子树一致（父不参与则整棵子树不参与）；事件帖作为根参与；
+// 统一使用 ThreadOrderPrefetch 的缓存；插入前复核 anchor，避免 NotFoundError。
 
+import app from 'flarum/forum/app';
 import { extend } from 'flarum/common/extend';
 import PostStream from 'flarum/forum/components/PostStream';
 import { waitOrderMap } from '../utils/ThreadOrderPrefetch';
 
 const BIG = 10_000_000;
 
-/* ---------------- 基本工具 ---------------- */
-
+/* ---------- DOM helpers ---------- */
 function getDidFromComponent(ps) {
-  try {
-    return ps?.stream?.discussion?.id?.() ?? null;
-  } catch {
-    return null;
-  }
+  try { return ps?.stream?.discussion?.id?.() ?? null; } catch { return null; }
 }
-
 function getContainer(ps) {
-  // 1) 根就是 .PostStream
-  if (ps?.element && ps.element.classList && ps.element.classList.contains('PostStream')) {
-    return ps.element;
-  }
-  // 2) 向下找
-  const found = ps?.element?.querySelector?.('.PostStream');
-  if (found) return found;
-  // 3) 兜底：全局找（极端情况下）
-  return document.querySelector('.PostStream') || null;
+  if (ps?.element?.classList?.contains('PostStream')) return ps.element;
+  return ps?.element?.querySelector?.('.PostStream') || document.querySelector('.PostStream') || null;
 }
-
 function isPostItem(el) {
   return el && el.nodeType === 1 && el.matches('.PostStream-item[data-id]');
 }
-
-function collectChildren(container) {
-  return Array.from(container?.children || []);
+function findPostsRange(container) {
+  const kids = Array.from(container?.children || []);
+  if (!kids.length) return { posts: [], anchor: null };
+  let L = kids.findIndex(isPostItem);
+  if (L < 0) return { posts: [], anchor: kids[0] || null };
+  let R = kids.length - 1 - [...kids].reverse().findIndex(isPostItem);
+  if (R < L) R = L;
+  const posts = kids.slice(L, R + 1).filter(isPostItem);
+  const anchor = kids[R + 1] || null;
+  return { posts, anchor };
 }
-
 function sameOrder(a, b) {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
   return true;
 }
 
-function signature(nodes) {
+/* ---------- model helpers ---------- */
+function getModel(id) {
+  try { return app.store.getById('posts', String(id)); } catch { return null; }
+}
+function getNumber(model) {
   try {
-    return nodes.map((n) => n.dataset.id).join(',');
-  } catch {
-    return '';
-  }
+    const n = model && typeof model.number === 'function' ? model.number() : null;
+    return Number.isFinite(n) ? n : null;
+  } catch { return null; }
+}
+function getCreatedTs(model) {
+  try {
+    const d = model && typeof model.createdAt === 'function' ? model.createdAt() : null;
+    return d instanceof Date ? d.getTime() : null;
+  } catch { return null; }
+}
+function isEventPost(model) {
+  // 大多数事件帖没有有效楼层号；把“无 number 的帖子”视为事件帖
+  return !Number.isFinite(getNumber(model));
 }
 
-function findPostsRange(container) {
-  const kids = collectChildren(container);
-  if (!kids.length) return { posts: [], left: -1, right: -1, anchor: null };
-
-  let L = kids.findIndex(isPostItem);
-  if (L < 0) return { posts: [], left: -1, right: -1, anchor: kids[0] || null };
-
-  let R = kids.length - 1 - [...kids].reverse().findIndex(isPostItem);
-  if (R < L) R = L;
-
-  const posts = kids.slice(L, R + 1).filter(isPostItem);
-  const anchor = kids[R + 1] || null; // 在“帖子段”之后的第一个兄弟之前插入
-  return { posts, left: L, right: R, anchor };
+/* ---------- order key with fallbacks ---------- */
+function orderKey(orderRec, model, id) {
+  // 1) 服务器线程顺序
+  if (orderRec && Number.isFinite(orderRec.order)) return Number(orderRec.order);
+  // 2) 楼层号
+  const n = getNumber(model);
+  if (n != null) return n;
+  // 3) 创建时间（置于 BIG/2 段，避免小序列冲突）
+  const t = getCreatedTs(model);
+  if (t != null) return BIG / 2 + t;
+  // 4) 最后兜底
+  return BIG + Number(id);
 }
 
-function getPostElById(container, id) {
-  return container?.querySelector?.(`.PostStream-item[data-id="${id}"]`) || null;
-}
-
-/* ---------------- 核心逻辑：仅同窗重排 ---------------- */
-
-/**
- * 仅当“根帖”或“父子同窗”才参与重排
- * - 根帖：parentId==null => 永远参与
- * - 子帖：父帖元素存在于当前 container 内 => 参与
- * - 其余：保持原位（不从排序槽里移动）
- */
+/* ---------- eligibility: subtree-consistent & in-window ---------- */
 function computeEligibility(container, posts, orderMap) {
-  const eligible = new Set();
   const present = new Set(posts.map((el) => Number(el.dataset.id)));
+  const models = new Map(posts.map((el) => [Number(el.dataset.id), getModel(Number(el.dataset.id))]));
 
+  // parentOf：优先线程表 parentId；没有就读模型的 parent_id
+  const parentOf = new Map();
   for (const el of posts) {
     const id = Number(el.dataset.id);
     const rec = orderMap.get(id);
+    const m = models.get(id);
+    const pid = rec ? rec.parentId : (m?.attribute ? m.attribute('parent_id') : null);
+    parentOf.set(id, pid == null ? null : Number(pid));
+  }
 
-    // 无记录：保守起见，不参与（避免误搬迁）
-    if (!rec) continue;
+  // 第一轮：根 & 事件帖 参与
+  const eligible = new Set();
+  for (const el of posts) {
+    const id = Number(el.dataset.id);
+    const m = models.get(id);
+    const pid = parentOf.get(id);
+    if (pid == null || isEventPost(m)) eligible.add(id);
+  }
 
-    if (rec.parentId == null) {
-      // 根帖永远参与
+  // 迭代：只有当“父 已 eligible 且 在当前 DOM”时，子才 eligible
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const el of posts) {
+      const id = Number(el.dataset.id);
+      if (eligible.has(id)) continue;
+      const pid = parentOf.get(id);
+      if (pid == null) continue;
+      if (!present.has(pid)) continue;     // 父不在窗：整棵子树留在原地
+      if (!eligible.has(pid)) continue;    // 父未纳入：整棵子树留在原地
       eligible.add(id);
-      continue;
-    }
-
-    // 父子同窗：父帖在当前 DOM 内
-    if (present.has(rec.parentId) || getPostElById(container, rec.parentId)) {
-      eligible.add(id);
+      changed = true;
     }
   }
 
-  return eligible;
+  return { eligible, models };
 }
 
-/**
- * 计算排序键：优先用 orderMap.order；缺失则落到 BIG+id
- */
-function orderKey(orderMap, el) {
-  const id = Number(el.dataset.id);
-  const rec = orderMap.get(id);
-  const base = rec ? Number(rec.order) : BIG + id;
-  return Number.isFinite(base) ? base : BIG + id;
-}
+/* ---------- build target sequence: replace only eligible slots ---------- */
+function computeTarget(posts, eligible, orderMap, models) {
+  const eligList = posts.filter((el) => eligible.has(Number(el.dataset.id)));
+  const sortedElig = eligList.slice().sort((a, b) => {
+    const ida = Number(a.dataset.id), idb = Number(b.dataset.id);
+    const ka = orderKey(orderMap.get(ida), models.get(ida), ida);
+    const kb = orderKey(orderMap.get(idb), models.get(idb), idb);
+    return ka === kb ? ida - idb : ka - kb;
+  });
 
-/**
- * 仅重排“可参与”的帖子；不可参与者保持原槽位
- * 实现：把 eligible 作为“可替换槽位”，用按线程顺序排序后的 eligible 列表去覆盖这些槽位，locked 保持不动。
- */
-function computeTargetOrder(container, posts, orderMap, eligibleSet) {
-  const eligibleList = posts.filter((el) => eligibleSet.has(Number(el.dataset.id)));
-  const sortedEligible = eligibleList
-    .slice()
-    .sort((a, b) => {
-      const ka = orderKey(orderMap, a);
-      const kb = orderKey(orderMap, b);
-      if (ka !== kb) return ka - kb;
-      // 次序相等则按 id 保证稳定性
-      const ida = Number(a.dataset.id);
-      const idb = Number(b.dataset.id);
-      return ida - idb;
-    });
-
-  // 用排好序的 eligible 覆盖“可参与”的槽位；locked 原样保留
-  const target = [];
+  const out = [];
   let j = 0;
   for (const el of posts) {
     const id = Number(el.dataset.id);
-    if (eligibleSet.has(id)) {
-      target.push(sortedEligible[j++]);
-    } else {
-      target.push(el);
-    }
+    out.push(eligible.has(id) ? sortedElig[j++] : el);
   }
-  return target;
+  return out;
 }
 
-function doReorder(container, currentPosts, orderMap) {
-  // 1) 计算可参与集合
-  const eligibleSet = computeEligibility(container, currentPosts, orderMap);
-
-  // 2) 生成目标序列（仅对 eligible 槽进行替换）
-  const target = computeTargetOrder(container, currentPosts, orderMap, eligibleSet);
-
-  // 3) 若无变化，直接返回
-  if (sameOrder(currentPosts, target)) return;
-
-  // 4) 在插入前，重新确认“帖子段”和 anchor，避免参照节点已被窗口化移除
-  const rangeNow = findPostsRange(container);
-  const anchor = (rangeNow.anchor && rangeNow.anchor.parentNode === container) ? rangeNow.anchor : null;
-
-  // 5) 执行插入：把目标序列按顺序插到“帖子段”之后的第一个兄弟前（anchor==null 等价 append）
-  //    这里我们给出最大容错：若过程中 DOM 窗口变化导致 anchor 失效，降级为 append。
-  try {
-    for (const el of target) {
-      if (anchor && anchor.parentNode === container) {
-        container.insertBefore(el, anchor);
-      } else {
-        container.appendChild(el);
-      }
-    }
-  } catch (e) {
-    // 某些极端时序仍可能出现 NotFoundError，吞掉并让下一轮 MutationObserver/更新再排
-    console.warn('[Threadify] reorder failed (will retry on next tick)', e);
-  }
-}
-
-/**
- * 读取 Map 后执行一次“仅同窗重排”
- */
+/* ---------- one-shot reorder ---------- */
 function reorderOnce(container, did) {
   return waitOrderMap(did)
-    .then((map) => {
+    .then((orderMap) => {
       const { posts } = findPostsRange(container);
       if (!posts.length) return;
-      doReorder(container, posts, map || new Map());
+
+      const { eligible, models } = computeEligibility(container, posts, orderMap || new Map());
+      const target = computeTarget(posts, eligible, orderMap || new Map(), models);
+
+      if (sameOrder(posts, target)) return;
+
+      // 插入前复核 anchor，避免 NotFoundError
+      const latest = findPostsRange(container);
+      const anchor = (latest.anchor && latest.anchor.parentNode === container) ? latest.anchor : null;
+
+      try {
+        for (const el of target) {
+          if (anchor && anchor.parentNode === container) container.insertBefore(el, anchor);
+          else container.appendChild(el);
+        }
+      } catch (e) {
+        console.warn('[Threadify] reorder failed (retry next tick)', e);
+      }
     })
     .catch((e) => {
       console.warn('[Threadify] order map unavailable', e);
     });
 }
 
-/* ---------------- 生命周期挂钩 ---------------- */
-
+/* ---------- lifecycle ---------- */
 export function installDomReorderMode() {
   extend(PostStream.prototype, 'oncreate', function () {
     const did = getDidFromComponent(this);
     const container = getContainer(this);
     if (!did || !container) return;
 
-    // 首次：拉取并按“仅同窗重排”
+    // 首次
     reorderOnce(container, did);
 
-    // 监听 Realtime/分页引起的子节点变化，下一帧再按“仅同窗重排”
+    // 监听子节点变化（分页/Realtime），下一帧执行
     let scheduled = false;
     const observer = new MutationObserver((muts) => {
       if (!muts.some((m) => m.type === 'childList')) return;
@@ -230,9 +199,7 @@ export function installDomReorderMode() {
 
   extend(PostStream.prototype, 'onremove', function () {
     if (this.__threadifyDomObserver) {
-      try {
-        this.__threadifyDomObserver.disconnect();
-      } catch {}
+      try { this.__threadifyDomObserver.disconnect(); } catch {}
       this.__threadifyDomObserver = null;
     }
   });
