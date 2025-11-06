@@ -1,25 +1,8 @@
 {
-    "name": "syntaxoutlaw/threadify",
+    "name": "lady-byron/threadify",
     "description": "A Flarum extension that adds threaded discussions with visual indentation to your forum, making complex conversations easier to follow.",
     "type": "flarum-extension",
-    "version": "1.0.6",
     "license": "MIT",
-    "keywords": [
-        "flarum",
-        "extension",
-        "threading",
-        "discussions",
-        "forum",
-        "nested",
-        "replies"
-    ],
-    "authors": [
-        {
-            "name": "SyntaxOutlaw",
-            "email": "joel@graycode.ie",
-            "homepage": "https://github.com/syntaxoutlaw"
-        }
-    ],
     "require": {
         "flarum/core": "^1.8.0",
         "flarum/mentions": "^1.8.0"
@@ -38,7 +21,7 @@
             "title": "Threadify",
             "category": "feature",
             "icon": {
-                "name": "fas fa-comments",
+                "name": "fas fa-comment-dots",
                 "backgroundColor": "#4D698E",
                 "color": "#fff"
             }
@@ -49,17 +32,6 @@
             }
         }
     },
-    "support": {
-        "issues": "https://github.com/syntaxoutlaw/threadify/issues",
-        "source": "https://github.com/syntaxoutlaw/threadify",
-        "docs": "https://github.com/syntaxoutlaw/threadify#readme"
-    },
-    "funding": [
-        {
-            "type": "other",
-            "url": "https://coff.ee/syntaxoutlaw"
-        }
-    ],
     "minimum-stability": "stable",
     "prefer-stable": true
 }
