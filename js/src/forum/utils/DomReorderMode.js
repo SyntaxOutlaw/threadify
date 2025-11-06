@@ -1,11 +1,16 @@
 // js/src/forum/utils/DomReorderMode.js
-// 仅在“同窗”内重排；子树一致（父不参与则整棵子树不参与）；事件帖作为根参与；
+// 仅在“同窗”内重排；子树一致（父不参与则整棵子树不参与）；事件帖二阶段按时间就位；
+// Realtime 兼容：检测新增节点后，合并一帧强制刷新顺序表并立刻重排；
 // 统一使用 ThreadOrderPrefetch 的缓存；插入前复核 anchor，避免 NotFoundError。
 
 import app from 'flarum/forum/app';
 import { extend } from 'flarum/common/extend';
 import PostStream from 'flarum/forum/components/PostStream';
-import { waitOrderMap } from '../utils/ThreadOrderPrefetch';
+import {
+  waitOrderMap,
+  prefetchThreadOrder,
+  invalidateThreadOrder,
+} from '../utils/ThreadOrderPrefetch';
 
 const BIG = 10_000_000;
 
@@ -121,7 +126,6 @@ function computeEligibility(container, posts, orderMap) {
   const eligible = new Set();
   for (const el of posts) {
     const id = Number(el.dataset.id);
-    const m = models.get(id);
     if (events.has(id)) continue; // 事件帖：二阶段处理
     const pid = parentOf.get(id);
     if (pid == null) eligible.add(id);
@@ -237,7 +241,7 @@ function reorderOnce(container, did) {
     });
 }
 
-/* ---------- lifecycle ---------- */
+/* ---------- lifecycle (with Realtime-friendly path) ---------- */
 export function installDomReorderMode() {
   extend(PostStream.prototype, 'oncreate', function () {
     const did = getDidFromComponent(this);
@@ -247,10 +251,42 @@ export function installDomReorderMode() {
     // 首次
     reorderOnce(container, did);
 
-    // 监听子节点变化（分页/Realtime），下一帧执行
+    // 监听子节点变化（分页/Realtime）
     let scheduled = false;
+    let isReordering = false;
+    let coalesceTimer = null;
+
     const observer = new MutationObserver((muts) => {
-      if (!muts.some((m) => m.type === 'childList')) return;
+      const added = muts
+        .filter((m) => m.type === 'childList')
+        .flatMap((m) => Array.from(m.addedNodes || []))
+        .filter((n) => n && n.nodeType === 1 && n.matches && n.matches('.PostStream-item[data-id]'));
+
+      // —— Realtime 路径：有新增帖子，合并一帧后强制刷新顺序表并立刻重排 —— //
+      if (added.length) {
+        if (isReordering) return;
+        clearTimeout(coalesceTimer);
+        coalesceTimer = setTimeout(async () => {
+          isReordering = true;
+          try {
+            // 若新帖尚未进入缓存顺序表，先强制刷新
+            const map = (await waitOrderMap(did)) || new Map();
+            const missing = added.some((el) => !map.has(Number(el.dataset.id)));
+            if (missing) {
+              invalidateThreadOrder(did);
+              await prefetchThreadOrder(did, { force: true });
+            }
+            await reorderOnce(container, did);
+          } catch (e) {
+            console.warn('[Threadify] realtime reorder failed', e);
+          } finally {
+            isReordering = false;
+          }
+        }, 16); // 合并一帧内的多条新增
+        return; // 本轮不再走 rAF 调度
+      }
+
+      // —— 无新增：保持原来的轻量归一化（分页/渲染抖动） —— //
       if (scheduled) return;
       scheduled = true;
       requestAnimationFrame(() => {
@@ -277,4 +313,3 @@ export function installDomReorderMode() {
     }
   });
 }
-
