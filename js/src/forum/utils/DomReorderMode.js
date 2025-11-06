@@ -1,6 +1,8 @@
 // js/src/forum/utils/DomReorderMode.js
 // 仅在“同窗”内重排；子树一致（父不参与则整棵子树不参与）；事件帖二阶段按时间就位；
-// Realtime 兼容：检测新增节点后，合并一帧强制刷新顺序表并立刻重排；
+// Realtime 兼容：检测新增节点后强制刷新顺序表并立刻重排；
+// 作者侧“半水合”修复：监听 data-id/class 属性就绪即强刷 + 重排 + 轻量 redraw；
+// 锁定子树黏连（cohesion）：保证 locked 父与其 locked 子孙在同窗内连续贴近；
 // 统一使用 ThreadOrderPrefetch 的缓存；插入前复核 anchor，避免 NotFoundError。
 
 import app from 'flarum/forum/app';
@@ -13,6 +15,21 @@ import {
 } from '../utils/ThreadOrderPrefetch';
 
 const BIG = 10_000_000;
+
+/* ---------- utils: mithril redraw throttle ---------- */
+let redrawScheduled = false;
+function scheduleRedraw() {
+  if (redrawScheduled) return;
+  redrawScheduled = true;
+  try {
+    requestAnimationFrame(() => {
+      redrawScheduled = false;
+      if (typeof m === 'function' && typeof m.redraw === 'function') m.redraw();
+    });
+  } catch (_) {
+    redrawScheduled = false;
+  }
+}
 
 /* ---------- DOM helpers ---------- */
 function getDidFromComponent(ps) {
@@ -70,13 +87,13 @@ function isEventPostByEl(el, model) {
   // 首选：contentType !== 'comment'
   const ct = getContentType(model);
   if (ct && ct !== 'comment') return true;
-  // 兜底：DOM 线索（主题/扩展常见类名）
+  // 兜底：DOM 线索（常见类名）
   if (el?.classList?.contains('EventPost') || el?.classList?.contains('Post-event')) return true;
   if (el?.querySelector?.('.EventPost, .Post-event, .EventPost-icon')) return true;
   return false;
 }
 
-/* ---------- order key with fallbacks ---------- */
+/* ---------- order keys ---------- */
 function orderKey(orderRec, model, id) {
   // 1) 服务器线程顺序
   if (orderRec && Number.isFinite(orderRec.order)) return Number(orderRec.order);
@@ -90,7 +107,7 @@ function orderKey(orderRec, model, id) {
   return BIG + Number(id);
 }
 
-// 线性时间键（用于事件帖与时间相对定位；也用于 locked 的比较）
+// 线性时间键（用于事件帖时间就位 & 锁定黏连排序）
 function linearKey(model, id) {
   const t = getCreatedTs(model);
   if (t != null) return t;
@@ -100,7 +117,7 @@ function linearKey(model, id) {
 }
 
 /* ---------- eligibility: subtree-consistent & in-window ---------- */
-function computeEligibility(container, posts, orderMap) {
+function computeEligibility(posts, orderMap) {
   const present = new Set(posts.map((el) => Number(el.dataset.id)));
   const models = new Map(posts.map((el) => [Number(el.dataset.id), getModel(Number(el.dataset.id))]));
 
@@ -147,17 +164,17 @@ function computeEligibility(container, posts, orderMap) {
     }
   }
 
-  return { eligible, events, models };
+  return { eligible, events, models, parentOf, present };
 }
 
-/* ---------- build target sequence ---------- */
+/* ---------- build: phase1 comments + phase2 events ---------- */
 /**
  * 两阶段：
  * 1) 评论：只替换 eligible 槽位（子树一致 + 同窗）
  * 2) 事件帖：从结果中“拿出所有事件帖”，按 createdAt 升序，
  *    逐个插到“第一条时间 > 它 的评论”之前（没有则追加到末尾）
  */
-function computeTarget(posts, eligible, events, orderMap, models) {
+function buildBaseTarget(posts, eligible, events, orderMap, models) {
   // 1) 评论先排好（只替换 eligible 槽位）
   const eligList = posts.filter((el) => eligible.has(Number(el.dataset.id)));
   const sortedElig = eligList.slice().sort((a, b) => {
@@ -198,7 +215,6 @@ function computeTarget(posts, eligible, events, orderMap, models) {
   for (const evEl of evtList) {
     const eid = Number(evEl.dataset.id);
     const ek = linearKey(models.get(eid), eid);
-
     let insertAt = -1;
     for (let i = 0; i < out.length; i++) {
       const ck = commentKey(out[i]);
@@ -211,37 +227,114 @@ function computeTarget(posts, eligible, events, orderMap, models) {
   return out;
 }
 
-/* ---------- one-shot reorder ---------- */
-function reorderOnce(container, did) {
-  return waitOrderMap(did)
-    .then((orderMap) => {
-      const { posts } = findPostsRange(container);
-      if (!posts.length) return;
+/* ---------- phase3: locked cohesion (压实同窗 locked 子树) ---------- */
+function applyLockedCohesion(sequence, eligible, events, models, parentOf) {
+  // sequence: 当前最终顺序（DOM 节点数组）
+  const presentIds = sequence.map((el) => Number(el.dataset.id));
+  const present = new Set(presentIds);
 
-      const { eligible, events, models } = computeEligibility(container, posts, orderMap || new Map());
-      const target = computeTarget(posts, eligible, events, orderMap || new Map(), models);
+  // locked = 非事件、非 eligible
+  const locked = new Set(presentIds.filter((id) => !events.has(id) && !eligible.has(id)));
+  if (!locked.size) return sequence;
 
-      if (sameOrder(posts, target)) return;
+  // 最近可见 locked 祖先
+  function nearestVisibleLockedAncestor(id) {
+    let cur = id;
+    for (let guard = 0; guard < 100; guard++) {
+      const pid = parentOf.get(cur);
+      if (pid == null) return null;
+      if (!present.has(pid)) return null;
+      if (locked.has(pid)) return pid;
+      cur = pid;
+    }
+    return null;
+  }
 
-      // 插入前复核 anchor，避免 NotFoundError
-      const latest = findPostsRange(container);
-      const anchor = (latest.anchor && latest.anchor.parentNode === container) ? latest.anchor : null;
+  // rootId -> members(Set)
+  const groups = new Map();
+  for (const id of locked) {
+    const root = nearestVisibleLockedAncestor(id);
+    if (root == null || root === id) continue;
+    if (!groups.has(root)) groups.set(root, new Set());
+    groups.get(root).add(id);
+  }
+  if (!groups.size) return sequence;
 
-      try {
-        for (const el of target) {
-          if (anchor && anchor.parentNode === container) container.insertBefore(el, anchor);
-          else container.appendChild(el);
-        }
-      } catch (e) {
-        console.warn('[Threadify] reorder failed (retry next tick)', e);
-      }
-    })
-    .catch((e) => {
-      console.warn('[Threadify] order map unavailable', e);
+  // index 映射
+  const indexOfId = new Map(sequence.map((el, idx) => [Number(el.dataset.id), idx]));
+  const sortedRoots = Array.from(groups.keys()).sort((a, b) => (indexOfId.get(a) - indexOfId.get(b)));
+
+  // 生成 id -> el 快查
+  const byIdEl = new Map(sequence.map((el) => [Number(el.dataset.id), el]));
+
+  // 可变数组操作副本
+  const out = sequence.slice();
+
+  // 帮助：移除一系列成员（id）并返回它们（保持原顺序）
+  function extractMembers(ids) {
+    // 根据 out 中现有顺序取出
+    const set = new Set(ids);
+    const picked = [];
+    for (let i = 0; i < out.length; i++) {
+      const id = Number(out[i].dataset.id);
+      if (set.has(id)) { picked.push(out[i]); out.splice(i, 1); i--; }
+    }
+    return picked;
+  }
+
+  for (const rootId of sortedRoots) {
+    const rootIdx = out.findIndex((el) => Number(el.dataset.id) === rootId);
+    if (rootIdx < 0) continue;
+
+    // 成员按线性时间键排序
+    const memberIds = Array.from(groups.get(rootId));
+    memberIds.sort((a, b) => {
+      const ka = linearKey(models.get(a), a);
+      const kb = linearKey(models.get(b), b);
+      return ka === kb ? a - b : ka - kb;
     });
+
+    const membersEls = extractMembers(memberIds);
+
+    // 插到 root 后面（保持成员内部顺序）
+    out.splice(rootIdx + 1, 0, ...membersEls);
+  }
+
+  return out;
 }
 
-/* ---------- lifecycle (with Realtime-friendly path) ---------- */
+/* ---------- one-shot reorder pipeline ---------- */
+async function reorderOnce(container, did) {
+  const orderMap = (await waitOrderMap(did)) || new Map();
+  const { posts } = findPostsRange(container);
+  if (!posts.length) return;
+
+  const { eligible, events, models, parentOf } = computeEligibility(posts, orderMap);
+  // Phase 1 & 2
+  const base = buildBaseTarget(posts, eligible, events, orderMap, models);
+  // Phase 3: cohesion
+  const target = applyLockedCohesion(base, eligible, events, models, parentOf);
+
+  if (sameOrder(posts, target)) return;
+
+  // 插入前复核 anchor，避免 NotFoundError
+  const latest = findPostsRange(container);
+  const anchor = (latest.anchor && latest.anchor.parentNode === container) ? latest.anchor : null;
+
+  try {
+    for (const el of target) {
+      if (anchor && anchor.parentNode === container) container.insertBefore(el, anchor);
+      else container.appendChild(el);
+    }
+  } catch (e) {
+    console.warn('[Threadify] reorder failed (will retry)', e);
+  }
+
+  // 轻量重绘，触发 Post.prototype.classes 重新计算缩进
+  scheduleRedraw();
+}
+
+/* ---------- lifecycle with realtime + hydration paths ---------- */
 export function installDomReorderMode() {
   extend(PostStream.prototype, 'oncreate', function () {
     const did = getDidFromComponent(this);
@@ -251,25 +344,24 @@ export function installDomReorderMode() {
     // 首次
     reorderOnce(container, did);
 
-    // 监听子节点变化（分页/Realtime）
+    // 监听子节点变化（分页/Realtime）+ 属性就绪（作者侧半水合）
     let scheduled = false;
     let isReordering = false;
     let coalesceTimer = null;
 
     const observer = new MutationObserver((muts) => {
-      const added = muts
-        .filter((m) => m.type === 'childList')
+      const childMut = muts.filter((m) => m.type === 'childList');
+      const added = childMut
         .flatMap((m) => Array.from(m.addedNodes || []))
         .filter((n) => n && n.nodeType === 1 && n.matches && n.matches('.PostStream-item[data-id]'));
 
-      // —— Realtime 路径：有新增帖子，合并一帧后强制刷新顺序表并立刻重排 —— //
+      // —— Realtime/分页：新增了可识别帖子节点 —— //
       if (added.length) {
         if (isReordering) return;
         clearTimeout(coalesceTimer);
         coalesceTimer = setTimeout(async () => {
           isReordering = true;
           try {
-            // 若新帖尚未进入缓存顺序表，先强制刷新
             const map = (await waitOrderMap(did)) || new Map();
             const missing = added.some((el) => !map.has(Number(el.dataset.id)));
             if (missing) {
@@ -282,11 +374,46 @@ export function installDomReorderMode() {
           } finally {
             isReordering = false;
           }
-        }, 16); // 合并一帧内的多条新增
+        }, 16);
         return; // 本轮不再走 rAF 调度
       }
 
-      // —— 无新增：保持原来的轻量归一化（分页/渲染抖动） —— //
+      // —— 作者侧半水合：属性就绪（data-id/class） —— //
+      const attrMut = muts.filter((m) => m.type === 'attributes');
+      const hydrationHit = attrMut.some((m) => {
+        const el = m.target;
+        if (!el || !el.matches || !el.matches('.PostStream-item')) return false;
+        if (m.attributeName === 'data-id') {
+          // 刚获得 data-id
+          return !!el.getAttribute('data-id');
+        }
+        if (m.attributeName === 'class') {
+          // 从 saving/占位变为正常渲染（宽松匹配）
+          const cl = el.className || '';
+          return /PostStream-item/.test(cl) && /Post--saving/.test(m.oldValue || '') && !/Post--saving/.test(cl);
+        }
+        return false;
+      });
+
+      if (hydrationHit) {
+        if (isReordering) return;
+        clearTimeout(coalesceTimer);
+        coalesceTimer = setTimeout(async () => {
+          isReordering = true;
+          try {
+            invalidateThreadOrder(did);
+            await prefetchThreadOrder(did, { force: true });
+            await reorderOnce(container, did);
+          } catch (e) {
+            console.warn('[Threadify] hydration reorder failed', e);
+          } finally {
+            isReordering = false;
+          }
+        }, 16);
+        return;
+      }
+
+      // —— 无新增/无属性就绪：轻量归一化（分页/微抖动） —— //
       if (scheduled) return;
       scheduled = true;
       requestAnimationFrame(() => {
@@ -295,7 +422,14 @@ export function installDomReorderMode() {
       });
     });
 
-    observer.observe(container, { childList: true });
+    observer.observe(container, {
+      childList: true,
+      attributes: true,
+      attributeOldValue: true,
+      attributeFilter: ['data-id', 'class'],
+      subtree: true,
+    });
+
     this.__threadifyDomObserver = observer;
   });
 
@@ -312,4 +446,9 @@ export function installDomReorderMode() {
       this.__threadifyDomObserver = null;
     }
   });
+
+  // 预取就绪时轻量 redraw，保证缩进类尽快正确
+  try {
+    window.addEventListener('threadify:order-ready', () => scheduleRedraw());
+  } catch (_) {}
 }
