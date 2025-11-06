@@ -36,8 +36,8 @@
 
 /* 移动端：第1级 8px，之后每级 +2px（最大到 depth-10 = 26px） */
 @media (max-width: 768px) {
-  @thread-mobile-first: 8px;
-  @thread-mobile-step: 4px;
+  @thread-mobile-first: 4px;
+  @thread-mobile-step: 2px;
 
   .thread-depth-1  { margin-left: (@thread-mobile-first + @thread-mobile-step * 0) !important; }  // 8px
   .thread-depth-2  { margin-left: (@thread-mobile-first + @thread-mobile-step * 1) !important; }  // 10px
