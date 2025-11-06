@@ -3,11 +3,11 @@
 namespace SyntaxOutlaw\Threadify\Api\Controller;
 
 use Flarum\Http\RequestUtil;
+use Illuminate\Database\ConnectionInterface;
+use Laminas\Diactoros\Response\JsonResponse;
 use Psr\Http\Message\ResponseInterface;
 use Psr\Http\Message\ServerRequestInterface;
 use Psr\Http\Server\RequestHandlerInterface;
-use Laminas\Diactoros\Response\JsonResponse;
-use Illuminate\Database\ConnectionInterface;
 
 class RebuildParentIdsController implements RequestHandlerInterface
 {
@@ -16,214 +16,175 @@ class RebuildParentIdsController implements RequestHandlerInterface
         $actor = RequestUtil::getActor($request);
         $actor->assertAdmin();
 
+        /** @var ConnectionInterface $db */
         $db = resolve(ConnectionInterface::class);
-        $results = [];
 
-        // --- PART 1: Populate parent_id in posts ---
+        // 逻辑表名（供 Query Builder 使用，自动加前缀）
+        $tableLogical  = 'threadify_threads';
+        // 物理表名（仅供 raw SQL 使用，需要手动带前缀）
+        $tablePrefixed = $db->getTablePrefix() . $tableLogical;
+
+        $results = [
+            'parent_id_updated'  => 0,
+            'parent_id_skipped'  => 0,
+            'threads_processed'  => 0,
+            'threads_errors'     => 0,
+            'child_descendant_counts_updated' => false,
+        ];
+
+        // --- PART 1: 从内容回填 posts.parent_id ---
         $posts = $db->table('posts')
             ->whereNull('parent_id')
             ->where('type', 'comment')
+            ->select(['id', 'discussion_id', 'content'])
             ->get();
-        $updated = 0;
-        $skipped = 0;
+
         foreach ($posts as $post) {
             $parentId = self::extractParentFromContent($post->content);
-            if ($parentId) {
-                $parentExists = $db->table('posts')
-                    ->where('id', $parentId)
-                    ->where('discussion_id', $post->discussion_id)
-                    ->exists();
-                if ($parentExists) {
-                    $db->table('posts')->where('id', $post->id)->update(['parent_id' => $parentId]);
-                    $updated++;
-                } else {
-                    $skipped++;
-                }
+            if (!$parentId) {
+                $results['parent_id_skipped']++;
+                continue;
+            }
+
+            $parentExists = $db->table('posts')
+                ->where('id', $parentId)
+                ->where('discussion_id', $post->discussion_id)
+                ->exists();
+
+            if ($parentExists) {
+                $db->table('posts')->where('id', $post->id)->update(['parent_id' => $parentId]);
+                $results['parent_id_updated']++;
+            } else {
+                $results['parent_id_skipped']++;
             }
         }
-        $results['parent_id_updated'] = $updated;
-        $results['parent_id_skipped'] = $skipped;
 
-        // --- PART 2: Rebuild threadify_threads ---
-        $tableName = 'threadify_threads';
-        $db->table($tableName)->truncate();
-        
-        // First pass: Insert all posts with basic data
-        $posts = $db->table('posts')
+        // --- PART 2: 重建 threadify_threads ---
+        // 清空旧数据
+        $db->table($tableLogical)->truncate();
+
+        // 以讨论 & 时间升序遍历，尽量保证父先子后
+        $all = $db->table('posts')
             ->where('type', 'comment')
             ->orderBy('discussion_id')
             ->orderBy('created_at')
             ->get();
-        $processedCount = 0;
-        $errorCount = 0;
-        
-        foreach ($posts as $post) {
+
+        foreach ($all as $post) {
             try {
-                $parentId = $post->parent_id;
-                $threadData = self::calculateThreadData($db, $post, $parentId, $tableName);
-                $db->table($tableName)->insert([
-                    'discussion_id' => $post->discussion_id,
-                    'post_id' => $post->id,
-                    'parent_post_id' => $parentId,
-                    'root_post_id' => $threadData['root_post_id'],
-                    'depth' => $threadData['depth'],
-                    'thread_path' => $threadData['thread_path'],
-                    'child_count' => 0,
-                    'descendant_count' => 0,
-                    'created_at' => $post->created_at,
-                    'updated_at' => $post->created_at,
+                $parentId   = $post->parent_id;
+                $threadData = self::calculateThreadData($db, $post, $parentId, $tableLogical);
+
+                $db->table($tableLogical)->insert([
+                    'discussion_id'   => $post->discussion_id,
+                    'post_id'         => $post->id,
+                    'parent_post_id'  => $parentId,
+                    'root_post_id'    => $threadData['root_post_id'],
+                    'depth'           => $threadData['depth'],
+                    'thread_path'     => $threadData['thread_path'],
+                    'child_count'     => 0,
+                    'descendant_count'=> 0,
+                    'created_at'      => $post->created_at,
+                    'updated_at'      => $post->created_at,
                 ]);
-                $processedCount++;
-            } catch (\Exception $e) {
-                $errorCount++;
+
+                $results['threads_processed']++;
+            } catch (\Throwable $e) {
+                $results['threads_errors']++;
             }
         }
-        $results['threads_processed'] = $processedCount;
-        $results['threads_errors'] = $errorCount;
 
-        // --- PART 3: Update child and descendant counts ---
-        // Update child counts
+        // --- PART 3: 统计 child_count / descendant_count ---
+        // 3.1 子数（使用 raw SQL，但带上前缀的物理表名）
         $db->statement("
-            UPDATE {$tableName} t1
+            UPDATE {$tablePrefixed} t1
             INNER JOIN (
-                SELECT parent_post_id, COUNT(*) as count
-                FROM {$tableName} 
+                SELECT parent_post_id, COUNT(*) AS cnt
+                FROM {$tablePrefixed}
                 WHERE parent_post_id IS NOT NULL
                 GROUP BY parent_post_id
             ) t2 ON t1.post_id = t2.parent_post_id
-            SET t1.child_count = t2.count
+            SET t1.child_count = t2.cnt
         ");
-        
-        // Update descendant counts for root posts
+
+        // 3.2 根节点后代数（同上）
         $db->statement("
-            UPDATE {$tableName} t1
+            UPDATE {$tablePrefixed} t1
             INNER JOIN (
-                SELECT 
-                    root_post_id,
-                    COUNT(*) - 1 as count
-                FROM {$tableName} 
+                SELECT root_post_id, COUNT(*) - 1 AS cnt
+                FROM {$tablePrefixed}
                 GROUP BY root_post_id
             ) t2 ON t1.post_id = t2.root_post_id
-            SET t1.descendant_count = t2.count
+            SET t1.descendant_count = t2.cnt
             WHERE t1.parent_post_id IS NULL
         ");
-        
-        // Update descendant counts for non-root posts
-        $threads = $db->table('threadify_threads')->whereNotNull('parent_post_id')->get();
+
+        // 3.3 非根节点后代数：用 Query Builder（自动前缀）
+        $threads = $db->table($tableLogical)->whereNotNull('parent_post_id')->get(['id', 'thread_path']);
         foreach ($threads as $thread) {
-            $descendantCount = $db->table('threadify_threads')
+            $descendantCount = $db->table($tableLogical)
                 ->where('thread_path', 'LIKE', $thread->thread_path . '/%')
                 ->count();
-            $db->table('threadify_threads')
+
+            $db->table($tableLogical)
                 ->where('id', $thread->id)
                 ->update(['descendant_count' => $descendantCount]);
         }
+
         $results['child_descendant_counts_updated'] = true;
 
         return new JsonResponse(['status' => 'ok', 'results' => $results]);
     }
 
-    private static function extractParentFromContent($content)
+    /* -------------------- Helpers -------------------- */
+
+    private static function extractParentFromContent($content): ?int
     {
         if (!$content) return null;
-        if (preg_match('/<POSTMENTION[^>]+id=\"(\d+)\"[^>]*>/', $content, $matches)) {
-            return (int)$matches[1];
-        }
-        if (preg_match('/<[^>]+class=\"[^\"]*PostMention[^\"]*\"[^>]+data-id=\"(\d+)\"[^>]*>/', $content, $matches)) {
-            return (int)$matches[1];
-        }
-        if (preg_match('/@\"[^\"]*\"#p(\d+)/', $content, $matches)) {
-            return (int)$matches[1];
-        }
-        return null;
-    }
 
-    private static function calculateThreadData($db, $post, $parentId, $tableName)
+        // <POSTMENTION ... id="123" ...>
+        if (preg_match('/<POSTMENTION[^>]+id=\"(\d+)\"[^>]*>/', $content, $m)) {
+            return (int) $m[1];
+        }
+        // class="...PostMention..." data-id="123"
+        if (preg_match('/<[^>]+class=\"[^\"]*PostMention[^\"]*\"[^>]+data-id=\"(\d+)\"[^>]*>/', $content, $m)) {
+            return (int) $m[1];
+        }
+        // @"Display Name"#p123
+        if (preg_match('/@\"[^\"]*\"#p(\d+)/', $content, $m)) {
+            return (int) $m[1];
+        }
+
+        return null;
+        }
+
+    private static function calculateThreadData(ConnectionInterface $db, $post, ?int $parentId, string $tableLogical): array
     {
         if (!$parentId) {
             return [
-                'root_post_id' => $post->id,
-                'depth' => 0,
-                'thread_path' => (string) $post->id
+                'root_post_id' => (int) $post->id,
+                'depth'        => 0,
+                'thread_path'  => (string) $post->id,
             ];
         }
-        
-        // Find the parent post to get its thread data
-        $parentPost = $db->table('posts')
-            ->where('id', $parentId)
+
+        $parentThread = $db->table($tableLogical)
+            ->where('post_id', $parentId)
             ->first();
-            
-        if (!$parentPost) {
+
+        if (!$parentThread) {
+            // 父记录尚未入表：作为根处理（后续统计不受影响）
             return [
-                'root_post_id' => $post->id,
-                'depth' => 0,
-                'thread_path' => (string) $post->id
+                'root_post_id' => (int) $post->id,
+                'depth'        => 0,
+                'thread_path'  => (string) $post->id,
             ];
         }
-        
-        // If parent has no parent_id, it's a root post
-        if (!$parentPost->parent_id) {
-            return [
-                'root_post_id' => $parentId,
-                'depth' => 1,
-                'thread_path' => $parentId . '/' . $post->id
-            ];
-        }
-        
-        // Recursively find the root post
-        $rootPostId = self::findRootPostId($db, $parentId);
-        $depth = self::calculateDepth($db, $parentId) + 1;
-        $threadPath = self::buildThreadPath($db, $parentId) . '/' . $post->id;
-        
+
         return [
-            'root_post_id' => $rootPostId,
-            'depth' => $depth,
-            'thread_path' => $threadPath
+            'root_post_id' => (int) $parentThread->root_post_id,
+            'depth'        => (int) $parentThread->depth + 1,
+            'thread_path'  => (string) ($parentThread->thread_path . '/' . $post->id),
         ];
     }
-    
-    private static function findRootPostId($db, $postId)
-    {
-        $currentPostId = $postId;
-        while (true) {
-            $post = $db->table('posts')->where('id', $currentPostId)->first();
-            if (!$post || !$post->parent_id) {
-                return $currentPostId;
-            }
-            $currentPostId = $post->parent_id;
-        }
-    }
-    
-    private static function calculateDepth($db, $postId)
-    {
-        $depth = 0;
-        $currentPostId = $postId;
-        while (true) {
-            $post = $db->table('posts')->where('id', $currentPostId)->first();
-            if (!$post || !$post->parent_id) {
-                break;
-            }
-            $depth++;
-            $currentPostId = $post->parent_id;
-        }
-        return $depth;
-    }
-    
-    private static function buildThreadPath($db, $postId)
-    {
-        $path = [];
-        $currentPostId = $postId;
-        while (true) {
-            $post = $db->table('posts')->where('id', $currentPostId)->first();
-            if (!$post) {
-                break;
-            }
-            array_unshift($path, $currentPostId);
-            if (!$post->parent_id) {
-                break;
-            }
-            $currentPostId = $post->parent_id;
-        }
-        return implode('/', $path);
-    }
-} 
+}
