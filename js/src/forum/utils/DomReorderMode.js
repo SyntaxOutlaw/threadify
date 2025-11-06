@@ -53,9 +53,22 @@ function getCreatedTs(model) {
     return d instanceof Date ? d.getTime() : null;
   } catch { return null; }
 }
-function isEventPost(model) {
-  // 大多数事件帖没有有效楼层号；把“无 number 的帖子”视为事件帖
-  return !Number.isFinite(getNumber(model));
+function getContentType(model) {
+  try {
+    if (!model) return null;
+    if (typeof model.contentType === 'function') return model.contentType();
+    if (typeof model.attribute === 'function') return model.attribute('contentType') ?? null;
+  } catch {}
+  return null;
+}
+function isEventPostByEl(el, model) {
+  // 首选：contentType !== 'comment'
+  const ct = getContentType(model);
+  if (ct && ct !== 'comment') return true;
+  // 兜底：DOM 线索（主题/扩展常见类名）
+  if (el?.classList?.contains('EventPost') || el?.classList?.contains('Post-event')) return true;
+  if (el?.querySelector?.('.EventPost, .Post-event, .EventPost-icon')) return true;
+  return false;
 }
 
 /* ---------- order key with fallbacks ---------- */
@@ -65,10 +78,19 @@ function orderKey(orderRec, model, id) {
   // 2) 楼层号
   const n = getNumber(model);
   if (n != null) return n;
-  // 3) 创建时间（置于 BIG/2 段，避免小序列冲突）
+  // 3) 创建时间（置于 BIG/2 段，避免与 number 冲突）
   const t = getCreatedTs(model);
   if (t != null) return BIG / 2 + t;
   // 4) 最后兜底
+  return BIG + Number(id);
+}
+
+// 线性时间键（用于事件帖与时间相对定位；也用于 locked 的比较）
+function linearKey(model, id) {
+  const t = getCreatedTs(model);
+  if (t != null) return t;
+  const n = getNumber(model);
+  if (n != null) return BIG / 2 + n;
   return BIG + Number(id);
 }
 
@@ -87,13 +109,22 @@ function computeEligibility(container, posts, orderMap) {
     parentOf.set(id, pid == null ? null : Number(pid));
   }
 
-  // 第一轮：根 & 事件帖 参与
+  // 事件帖集合（不受父链限制，二阶段全局放置）
+  const events = new Set();
+  for (const el of posts) {
+    const id = Number(el.dataset.id);
+    const m = models.get(id);
+    if (isEventPostByEl(el, m)) events.add(id);
+  }
+
+  // 第一轮：评论根（pid==null）参与；事件帖不放进 eligible（留给第二阶段全局插入）
   const eligible = new Set();
   for (const el of posts) {
     const id = Number(el.dataset.id);
     const m = models.get(id);
+    if (events.has(id)) continue; // 事件帖：二阶段处理
     const pid = parentOf.get(id);
-    if (pid == null || isEventPost(m)) eligible.add(id);
+    if (pid == null) eligible.add(id);
   }
 
   // 迭代：只有当“父 已 eligible 且 在当前 DOM”时，子才 eligible
@@ -102,7 +133,7 @@ function computeEligibility(container, posts, orderMap) {
     changed = false;
     for (const el of posts) {
       const id = Number(el.dataset.id);
-      if (eligible.has(id)) continue;
+      if (eligible.has(id) || events.has(id)) continue; // 事件帖跳过
       const pid = parentOf.get(id);
       if (pid == null) continue;
       if (!present.has(pid)) continue;     // 父不在窗：整棵子树留在原地
@@ -112,11 +143,18 @@ function computeEligibility(container, posts, orderMap) {
     }
   }
 
-  return { eligible, models };
+  return { eligible, events, models };
 }
 
-/* ---------- build target sequence: replace only eligible slots ---------- */
-function computeTarget(posts, eligible, orderMap, models) {
+/* ---------- build target sequence ---------- */
+/**
+ * 两阶段：
+ * 1) 评论：只替换 eligible 槽位（子树一致 + 同窗）
+ * 2) 事件帖：从结果中“拿出所有事件帖”，按 createdAt 升序，
+ *    逐个插到“第一条时间 > 它 的评论”之前（没有则追加到末尾）
+ */
+function computeTarget(posts, eligible, events, orderMap, models) {
+  // 1) 评论先排好（只替换 eligible 槽位）
   const eligList = posts.filter((el) => eligible.has(Number(el.dataset.id)));
   const sortedElig = eligList.slice().sort((a, b) => {
     const ida = Number(a.dataset.id), idb = Number(b.dataset.id);
@@ -125,12 +163,47 @@ function computeTarget(posts, eligible, orderMap, models) {
     return ka === kb ? ida - idb : ka - kb;
   });
 
-  const out = [];
+  const base = [];
   let j = 0;
   for (const el of posts) {
     const id = Number(el.dataset.id);
-    out.push(eligible.has(id) ? sortedElig[j++] : el);
+    if (eligible.has(id)) base.push(sortedElig[j++]);
+    else base.push(el);
   }
+
+  // 2) 事件帖全局时间就位：先拿掉所有事件帖，再按时间插回
+  const withoutEvents = base.filter((el) => !events.has(Number(el.dataset.id)));
+  const evtList = posts.filter((el) => events.has(Number(el.dataset.id)));
+
+  // 事件帖按时间升序（时间相同按 id）
+  evtList.sort((a, b) => {
+    const ida = Number(a.dataset.id), idb = Number(b.dataset.id);
+    const ka = linearKey(models.get(ida), ida);
+    const kb = linearKey(models.get(idb), idb);
+    return ka === kb ? ida - idb : ka - kb;
+  });
+
+  // 为评论建立“线性时间键”
+  function commentKey(el) {
+    const id = Number(el.dataset.id);
+    return linearKey(models.get(id), id);
+  }
+
+  // 插入规则：插到“第一条 key > 事件 key 的评论”之前；没有就追加到末尾
+  const out = withoutEvents.slice();
+  for (const evEl of evtList) {
+    const eid = Number(evEl.dataset.id);
+    const ek = linearKey(models.get(eid), eid);
+
+    let insertAt = -1;
+    for (let i = 0; i < out.length; i++) {
+      const ck = commentKey(out[i]);
+      if (ck > ek) { insertAt = i; break; }
+    }
+    if (insertAt === -1) out.push(evEl);
+    else out.splice(insertAt, 0, evEl);
+  }
+
   return out;
 }
 
@@ -141,8 +214,8 @@ function reorderOnce(container, did) {
       const { posts } = findPostsRange(container);
       if (!posts.length) return;
 
-      const { eligible, models } = computeEligibility(container, posts, orderMap || new Map());
-      const target = computeTarget(posts, eligible, orderMap || new Map(), models);
+      const { eligible, events, models } = computeEligibility(container, posts, orderMap || new Map());
+      const target = computeTarget(posts, eligible, events, orderMap || new Map(), models);
 
       if (sameOrder(posts, target)) return;
 
@@ -204,3 +277,4 @@ export function installDomReorderMode() {
     }
   });
 }
+
