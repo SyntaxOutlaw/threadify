@@ -1,16 +1,21 @@
 // js/src/forum/utils/DomReorderMode.js
-// 物理重排 .PostStream-item[data-id] —— 仅当“父子同窗”才参与重排；根帖永远参与。
-// 不扩大窗口；不跨窗硬搬子帖；留在原地的子帖复用通用缩进逻辑即可。
-// 修复：插入前复核 anchor 仍属同容器，避免 NotFoundError；并在无变化时跳过重排。
-// 去冗余：不再维护本地缓存，统一复用 ThreadOrderPrefetch.waitOrderMap。
+// Threadify DOM Reorder — “锚定编织（anchored weave）”
+// 只在当前窗口(.PostStream-item[data-id])内工作，不修改 PostStreamState/窗口大小。
+// 规则：
+// - “可移动评论”：根帖或“父子同窗”的 comment（在 orderMap 里且父在窗或无父）。
+// - “固定节点”：事件帖（不在 orderMap）以及“父不在窗的子帖”（在 orderMap 但父不在窗）。
+// - 目标序列 = 以 /threads-order 的 order 为骨架；
+//   固定节点根据“邻近已知顺序”的插值得到 baseOrder，仅用于让可移动评论跨越它们；
+// - 只移动“可移动评论”，固定节点不搬家；自右向左按目标序列插入，避免竞态。
+// - 首次加载若 URL 带 near/#p，则在首轮重排后轻微回中该楼。
 
 import { extend } from 'flarum/common/extend';
 import PostStream from 'flarum/forum/components/PostStream';
 import { waitOrderMap } from '../utils/ThreadOrderPrefetch';
 
-const BIG = 10_000_000;
+const BIG = 1e9;
 
-/* ---------------- 基本工具 ---------------- */
+/* ---------------- 工具 ---------------- */
 
 function getDidFromComponent(ps) {
   try {
@@ -21,15 +26,9 @@ function getDidFromComponent(ps) {
 }
 
 function getContainer(ps) {
-  // 1) 根就是 .PostStream
-  if (ps?.element && ps.element.classList && ps.element.classList.contains('PostStream')) {
-    return ps.element;
-  }
-  // 2) 向下找
+  if (ps?.element?.classList?.contains('PostStream')) return ps.element;
   const found = ps?.element?.querySelector?.('.PostStream');
-  if (found) return found;
-  // 3) 兜底：全局找（极端情况下）
-  return document.querySelector('.PostStream') || null;
+  return found || document.querySelector('.PostStream') || null;
 }
 
 function isPostItem(el) {
@@ -38,20 +37,6 @@ function isPostItem(el) {
 
 function collectChildren(container) {
   return Array.from(container?.children || []);
-}
-
-function sameOrder(a, b) {
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
-  return true;
-}
-
-function signature(nodes) {
-  try {
-    return nodes.map((n) => n.dataset.id).join(',');
-  } catch {
-    return '';
-  }
 }
 
 function findPostsRange(container) {
@@ -65,131 +50,169 @@ function findPostsRange(container) {
   if (R < L) R = L;
 
   const posts = kids.slice(L, R + 1).filter(isPostItem);
-  const anchor = kids[R + 1] || null; // 在“帖子段”之后的第一个兄弟之前插入
+  const anchor = kids[R + 1] || null; // 段后第一个兄弟
   return { posts, left: L, right: R, anchor };
 }
 
-function getPostElById(container, id) {
-  return container?.querySelector?.(`.PostStream-item[data-id="${id}"]`) || null;
+function getNearIdFromURL() {
+  try {
+    const usp = new URLSearchParams(location.search);
+    const near = usp.get('near');
+    if (near && /^\d+$/.test(near)) return Number(near);
+
+    const m = (location.hash || '').match(/#p(\d+)/);
+    if (m) return Number(m[1]);
+  } catch {}
+  return null;
 }
 
-/* ---------------- 核心逻辑：仅同窗重排 ---------------- */
+function recenterIfNeeded(container, targetId, onceFlagObj) {
+  if (!targetId || onceFlagObj.done) return;
+  const el = container?.querySelector?.(`.PostStream-item[data-id="${targetId}"]`);
+  if (!el) return;
+  try {
+    el.scrollIntoView({ block: 'center', inline: 'nearest' });
+    onceFlagObj.done = true;
+  } catch {}
+}
+
+/* ---------------- 核心：计算目标序列 ---------------- */
 
 /**
- * 仅当“根帖”或“父子同窗”才参与重排
- * - 根帖：parentId==null => 永远参与
- * - 子帖：父帖元素存在于当前 container 内 => 参与
- * - 其余：保持原位（不从排序槽里移动）
+ * 生成“节点元数据”数组：
+ * - id: number
+ * - el: Element
+ * - rec: orderMap 记录（可能不存在）
+ * - movable: 是否可移动（根或父子同窗）
+ * - baseOrder: 数轴上的排序键（先留空，稍后补）
  */
-function computeEligibility(container, posts, orderMap) {
-  const eligible = new Set();
-  const present = new Set(posts.map((el) => Number(el.dataset.id)));
-
-  for (const el of posts) {
+function buildNodes(container, posts, orderMap) {
+  const presentIds = new Set(posts.map((el) => Number(el.dataset.id)));
+  const nodes = posts.map((el) => {
     const id = Number(el.dataset.id);
-    const rec = orderMap.get(id);
+    const rec = orderMap.get(id); // {order, depth, parentId} | undefined
 
-    // 无记录：保守起见，不参与（避免误搬迁）
-    if (!rec) continue;
-
-    if (rec.parentId == null) {
-      // 根帖永远参与
-      eligible.add(id);
-      continue;
+    let movable = false;
+    if (rec) {
+      if (rec.parentId == null) movable = true; // 根帖
+      else if (presentIds.has(rec.parentId)) movable = true; // 父子同窗
+      else movable = false; // 父不在窗 -> 暂不移动
+    } else {
+      movable = false; // 事件帖/其它：不在 orderMap
     }
 
-    // 父子同窗：父帖在当前 DOM 内
-    if (present.has(rec.parentId) || getPostElById(container, rec.parentId)) {
-      eligible.add(id);
+    return {
+      id,
+      el,
+      rec: rec || null,
+      movable,
+      baseOrder: rec ? Number(rec.order) : NaN, // 先放 known 值；其余稍后插值
+    };
+  });
+
+  // 为 baseOrder 为空(NaN)的节点做“邻近插值”：
+  // 思路：向左/右寻找最近的已知 baseOrder，取中点；仅用于让可移动评论跨越它们。
+  // 两趟扫描：记录每个位置左/右最近的已知值。
+  const n = nodes.length;
+  const leftKnown = new Array(n).fill(null);
+  const rightKnown = new Array(n).fill(null);
+
+  let last = null;
+  for (let i = 0; i < n; i++) {
+    if (Number.isFinite(nodes[i].baseOrder)) last = nodes[i].baseOrder;
+    leftKnown[i] = last;
+  }
+  last = null;
+  for (let i = n - 1; i >= 0; i--) {
+    if (Number.isFinite(nodes[i].baseOrder)) last = nodes[i].baseOrder;
+    rightKnown[i] = last;
+  }
+
+  for (let i = 0; i < n; i++) {
+    if (!Number.isFinite(nodes[i].baseOrder)) {
+      const L = leftKnown[i];
+      const R = rightKnown[i];
+      if (Number.isFinite(L) && Number.isFinite(R)) nodes[i].baseOrder = (L + R) / 2;
+      else if (Number.isFinite(L)) nodes[i].baseOrder = L + 0.5;
+      else if (Number.isFinite(R)) nodes[i].baseOrder = R - 0.5;
+      else nodes[i].baseOrder = BIG + i; // 极端兜底：没有任何已知点
     }
   }
 
-  return eligible;
+  // 细微去重：若 baseOrder 完全相同，按 id 提供一个极小偏移，保证稳定比较
+  // 同时确保数值安全（不影响整体相对大小）
+  const seen = new Map();
+  for (const node of nodes) {
+    const k = node.baseOrder;
+    const count = seen.get(k) || 0;
+    if (count) node.baseOrder = k + count * 1e-6;
+    seen.set(k, count + 1);
+  }
+
+  return nodes;
 }
 
 /**
- * 计算排序键：优先用 orderMap.order；缺失则落到 BIG+id
+ * 计算目标序列（按 baseOrder 升序、再按 id 升序）
+ * 返回一个“节点元数据”数组，包含所有帖子（可移动+固定）。
  */
-function orderKey(orderMap, el) {
-  const id = Number(el.dataset.id);
-  const rec = orderMap.get(id);
-  const base = rec ? Number(rec.order) : BIG + id;
-  return Number.isFinite(base) ? base : BIG + id;
-}
-
-/**
- * 仅重排“可参与”的帖子；不可参与者保持原槽位
- * 实现：把 eligible 作为“可替换槽位”，用按线程顺序排序后的 eligible 列表去覆盖这些槽位，locked 保持不动。
- */
-function computeTargetOrder(container, posts, orderMap, eligibleSet) {
-  const eligibleList = posts.filter((el) => eligibleSet.has(Number(el.dataset.id)));
-  const sortedEligible = eligibleList
+function computeTarget(nodes) {
+  return nodes
     .slice()
     .sort((a, b) => {
-      const ka = orderKey(orderMap, a);
-      const kb = orderKey(orderMap, b);
-      if (ka !== kb) return ka - kb;
-      // 次序相等则按 id 保证稳定性
-      const ida = Number(a.dataset.id);
-      const idb = Number(b.dataset.id);
-      return ida - idb;
+      if (a.baseOrder !== b.baseOrder) return a.baseOrder - b.baseOrder;
+      return a.id - b.id;
     });
-
-  // 用排好序的 eligible 覆盖“可参与”的槽位；locked 原样保留
-  const target = [];
-  let j = 0;
-  for (const el of posts) {
-    const id = Number(el.dataset.id);
-    if (eligibleSet.has(id)) {
-      target.push(sortedEligible[j++]);
-    } else {
-      target.push(el);
-    }
-  }
-  return target;
 }
 
-function doReorder(container, currentPosts, orderMap) {
-  // 1) 计算可参与集合
-  const eligibleSet = computeEligibility(container, currentPosts, orderMap);
-
-  // 2) 生成目标序列（仅对 eligible 槽进行替换）
-  const target = computeTargetOrder(container, currentPosts, orderMap, eligibleSet);
-
-  // 3) 若无变化，直接返回
-  if (sameOrder(currentPosts, target)) return;
-
-  // 4) 在插入前，重新确认“帖子段”和 anchor，避免参照节点已被窗口化移除
-  const rangeNow = findPostsRange(container);
-  const anchor = (rangeNow.anchor && rangeNow.anchor.parentNode === container) ? rangeNow.anchor : null;
-
-  // 5) 执行插入：把目标序列按顺序插到“帖子段”之后的第一个兄弟前（anchor==null 等价 append）
-  //    这里我们给出最大容错：若过程中 DOM 窗口变化导致 anchor 失效，降级为 append。
-  try {
-    for (const el of target) {
-      if (anchor && anchor.parentNode === container) {
-        container.insertBefore(el, anchor);
-      } else {
-        container.appendChild(el);
-      }
-    }
-  } catch (e) {
-    // 某些极端时序仍可能出现 NotFoundError，吞掉并让下一轮 MutationObserver/更新再排
-    console.warn('[Threadify] reorder failed (will retry on next tick)', e);
-  }
-}
+/* ---------------- 应用到 DOM（只搬可移动） ---------------- */
 
 /**
- * 读取 Map 后执行一次“仅同窗重排”
+ * 自右向左，将每个“可移动评论”插到它“下一个目标兄弟”之前。
+ * 好处：右侧的参照节点已在最终位置，insertBefore 总是有效；固定节点保持原位。
  */
-function reorderOnce(container, did) {
+function applyOrder(container, targetNodes) {
+  for (let i = targetNodes.length - 1; i >= 0; i--) {
+    const cur = targetNodes[i];
+    if (!cur.movable) continue; // 固定节点不搬家
+
+    const nextEl = i + 1 < targetNodes.length ? targetNodes[i + 1].el : null;
+
+    // 参照节点必须仍在同一 container，缺失则 append。
+    const ref =
+      nextEl && nextEl.parentNode === container ? nextEl : null;
+
+    // 当前节点必须也在 container 内
+    if (!cur.el || cur.el.parentNode !== container) continue;
+
+    try {
+      container.insertBefore(cur.el, ref);
+    } catch (e) {
+      // 极端竞态：下一轮再排
+      // eslint-disable-next-line no-console
+      console.warn('[Threadify] insertBefore failed; will retry', e);
+    }
+  }
+}
+
+/* ---------------- 一次重排流程 ---------------- */
+
+function reorderOnce(container, did, centerFlagObj) {
   return waitOrderMap(did)
     .then((map) => {
       const { posts } = findPostsRange(container);
       if (!posts.length) return;
-      doReorder(container, posts, map || new Map());
+
+      const nodes = buildNodes(container, posts, map || new Map());
+      const target = computeTarget(nodes);
+
+      applyOrder(container, target);
+
+      // 首轮 near/#p 回中（只做一次）
+      recenterIfNeeded(container, getNearIdFromURL(), centerFlagObj);
     })
     .catch((e) => {
+      // eslint-disable-next-line no-console
       console.warn('[Threadify] order map unavailable', e);
     });
 }
@@ -202,10 +225,11 @@ export function installDomReorderMode() {
     const container = getContainer(this);
     if (!did || !container) return;
 
-    // 首次：拉取并按“仅同窗重排”
-    reorderOnce(container, did);
+    // 首次：拉取并重排；near/#p 在首轮后回中一次
+    this.__threadifyNearCentered = { done: false };
+    reorderOnce(container, did, this.__threadifyNearCentered);
 
-    // 监听 Realtime/分页引起的子节点变化，下一帧再按“仅同窗重排”
+    // 监听 Realtime/分页的子节点变化，下一帧执行一次重排
     let scheduled = false;
     const observer = new MutationObserver((muts) => {
       if (!muts.some((m) => m.type === 'childList')) return;
@@ -213,7 +237,7 @@ export function installDomReorderMode() {
       scheduled = true;
       requestAnimationFrame(() => {
         scheduled = false;
-        reorderOnce(container, did);
+        reorderOnce(container, did, this.__threadifyNearCentered);
       });
     });
 
@@ -225,7 +249,7 @@ export function installDomReorderMode() {
     const did = getDidFromComponent(this);
     const container = getContainer(this);
     if (!did || !container) return;
-    reorderOnce(container, did);
+    reorderOnce(container, did, this.__threadifyNearCentered || { done: true });
   });
 
   extend(PostStream.prototype, 'onremove', function () {
