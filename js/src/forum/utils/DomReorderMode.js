@@ -336,7 +336,7 @@ async function reorderOnce(container, did) {
   scheduleRedraw();
 }
 
-/* ---------- lifecycle with realtime + hydration + retry ---------- */
+/* ---------- lifecycle with realtime + hydration + retry + removal deferral ---------- */
 export function installDomReorderMode() {
   extend(PostStream.prototype, 'oncreate', function () {
     const did = getDidFromComponent(this);
@@ -348,12 +348,14 @@ export function installDomReorderMode() {
     let scheduled = false;
     let isReordering = false;
     let coalesceTimer = null;
-    let repairTimer = null; // 作者侧缩进修补 retry
+    let repairTimer = null;   // 作者侧缩进修补 retry
+    let removalTimer = null;  // ★ 新增：仅移除场景延后重排
 
     const observer = new MutationObserver((muts) => {
+      const childListMuts = muts.filter((m) => m.type === 'childList');
+
       // 新增节点（Realtime/分页）
-      const added = muts
-        .filter((m) => m.type === 'childList')
+      const added = childListMuts
         .flatMap((m) => Array.from(m.addedNodes || []))
         .filter((n) => n && n.nodeType === 1 && n.matches && n.matches('.PostStream-item[data-id]'));
 
@@ -421,6 +423,36 @@ export function installDomReorderMode() {
             isReordering = false;
           }
         }, 16);
+        return;
+      }
+
+      // ★ 仅移除节点（删除/隐藏等）：延后重排，避开 PostStreamState 锚点测量帧
+      const removed = childListMuts
+        .flatMap((m) => Array.from(m.removedNodes || []))
+        .filter((n) => n && n.nodeType === 1 && n.matches && n.matches('.PostStream-item, .EventPost, .Post'));
+      if (removed.length) {
+        // 若本帧存在加载指示，稍加延时（向上/向下分页在进行）
+        const loadingHint = container.querySelector('.LoadingIndicator, .PostStream-loading, .Post--loading');
+        const delay = loadingHint ? 96 : 48;
+
+        if (isReordering) return;
+        clearTimeout(removalTimer);
+        removalTimer = setTimeout(() => {
+          // 双 rAF：确保上一帧的测量与布局提交完毕
+          requestAnimationFrame(() => {
+            requestAnimationFrame(async () => {
+              if (isReordering) return;
+              isReordering = true;
+              try {
+                await reorderOnce(container, did);
+              } catch (e) {
+                console.warn('[Threadify] removal defer reorder failed', e);
+              } finally {
+                isReordering = false;
+              }
+            });
+          });
+        }, delay);
         return;
       }
 
