@@ -394,11 +394,11 @@ export function installDomReorderMode() {
             repairTimer = setInterval(async () => {
               tries++;
               const map = (await waitOrderMap(did)) || new Map();
-          _B_B_    const changed = ensureDepthClassesForWindow(container, map);
+              const changed = ensureDepthClassesForWindow(container, map);
               if (changed || tries >= 10) {
                 clearInterval(repairTimer);
                 scheduleRedraw();
-              }
+             }
             }, 150);
           } catch (e) {
             console.warn('[Threadify] hydration reorder failed', e);
@@ -425,7 +425,7 @@ export function installDomReorderMode() {
       attributeOldValue: true,
       attributeFilter: ['data-id', 'class'],
       subtree: true,
-D     });
+    });
 
     this.__threadifyDomObserver = observer;
   });
