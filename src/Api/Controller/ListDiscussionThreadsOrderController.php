@@ -97,7 +97,7 @@ class ListDiscussionThreadsOrderController implements RequestHandlerInterface
                     foreach ($children as $ch) {
                         $dfs($ch);
                     }
-          _B_B_   }
+             }
             };
 
             $roots = $byParent[0] ?? [];
