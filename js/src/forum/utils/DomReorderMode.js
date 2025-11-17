@@ -293,7 +293,6 @@ async function reorderOnce(container, did) {
   const base   = buildBaseTarget(posts, eligible, events, orderMap, models);
   const target = applyLockedCohesion(base, eligible, events, models, parentOf);
 
-NEW-START
   // [MODIFIED] 第 4 步：优化重绘
   // 1. 记录 DOM 顺序是否发生了变化
   const domOrderChanged = !sameOrder(posts, target);
@@ -320,7 +319,6 @@ NEW-START
   if (domOrderChanged || classesChanged) {
     scheduleRedraw();
   }
-NEW-END
 }
 
 /* ---------- lifecycle with realtime + hydration + retry ---------- */
@@ -396,11 +394,11 @@ export function installDomReorderMode() {
             repairTimer = setInterval(async () => {
               tries++;
               const map = (await waitOrderMap(did)) || new Map();
-              const changed = ensureDepthClassesForWindow(container, map);
+          _B_B_    const changed = ensureDepthClassesForWindow(container, map);
               if (changed || tries >= 10) {
                 clearInterval(repairTimer);
                 scheduleRedraw();
-          _B_B__     }
+              }
             }, 150);
           } catch (e) {
             console.warn('[Threadify] hydration reorder failed', e);
@@ -427,7 +425,7 @@ export function installDomReorderMode() {
       attributeOldValue: true,
       attributeFilter: ['data-id', 'class'],
       subtree: true,
-    });
+D     });
 
     this.__threadifyDomObserver = observer;
   });
