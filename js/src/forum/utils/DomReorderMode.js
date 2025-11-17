@@ -423,14 +423,6 @@ export function installDomReorderMode() {
         }, 16);
         return;
       }
-
-      // 其它变化：轻量归一化
-      if (scheduled) return;
-      scheduled = true;
-      requestAnimationFrame(() => {
-        scheduled = false;
-        reorderOnce(container, did);
-      });
     });
 
     observer.observe(container, {
