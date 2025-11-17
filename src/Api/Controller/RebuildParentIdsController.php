@@ -11,190 +11,201 @@ use Psr\Http\Server\RequestHandlerInterface;
 
 class RebuildParentIdsController implements RequestHandlerInterface
 {
-    public function handle(ServerRequestInterface $request): ResponseInterface
-    {
-        $actor = RequestUtil::getActor($request);
-        $actor->assertAdmin();
+    public function handle(ServerRequestInterface $request): ResponseInterface
+    {
+        $actor = RequestUtil::getActor($request);
+        $actor->assertAdmin();
 
-        /** @var ConnectionInterface $db */
-        $db = resolve(ConnectionInterface::class);
+        /** @var ConnectionInterface $db */
+        $db = resolve(ConnectionInterface::class);
 
-        // 逻辑表名（供 Query Builder 使用，自动加前缀）
-        $tableLogical  = 'threadify_threads';
-        // 物理表名（仅供 raw SQL 使用，需要手动带前缀）
-        $tablePrefixed = $db->getTablePrefix() . $tableLogical;
+        // 逻辑表名（供 Query Builder 使用，自动加前缀）
+        $tableLogical = 'threadify_threads';
+        // 物理表名（仅供 raw SQL 使用，需要手动带前缀）
+        $tablePrefixed = $db->getTablePrefix() . $tableLogical;
 
-        $results = [
-            'parent_id_updated'  => 0,
-            'parent_id_skipped'  => 0,
-            'threads_processed'  => 0,
-            'threads_errors'     => 0,
-            'child_descendant_counts_updated' => false,
-        ];
+        $results = [
+            'parent_id_updated'               => 0,
+            'parent_id_skipped'               => 0,
+            'threads_processed'               => 0,
+            'threads_errors'                  => 0,
+            'child_descendant_counts_updated' => false,
+        ];
 
-        // --- PART 1: 从内容回填 posts.parent_id ---
-        $posts = $db->table('posts')
-            ->whereNull('parent_id')
-            ->where('type', 'comment')
-            ->select(['id', 'discussion_id', 'content'])
-            ->get();
+        // --- PART 1: 从内容回填 posts.parent_id ---
+        $posts = $db->table('posts')
+            ->whereNull('parent_id')
+            ->where('type', 'comment')
+            ->select(['id', 'discussion_id', 'content'])
+            ->get();
 
-        foreach ($posts as $post) {
-            $parentId = self::extractParentFromContent($post->content);
-            if (!$parentId) {
-                $results['parent_id_skipped']++;
-                continue;
-            }
+        foreach ($posts as $post) {
+            $parentId = self::extractParentFromContent($post->content);
+            if (! $parentId) {
+                $results['parent_id_skipped']++;
+                continue;
+            }
 
-            $parentExists = $db->table('posts')
-                ->where('id', $parentId)
-                ->where('discussion_id', $post->discussion_id)
-                ->exists();
+            $parentExists = $db->table('posts')
+                ->where('id', $parentId)
+                ->where('discussion_id', $post->discussion_id)
+                ->exists();
 
-            if ($parentExists) {
-                $db->table('posts')->where('id', $post->id)->update(['parent_id' => $parentId]);
-                $results['parent_id_updated']++;
-            } else {
-                $results['parent_id_skipped']++;
-            }
-        }
+            if ($parentExists) {
+                $db->table('posts')
+                    ->where('id', $post->id)
+                    ->update(['parent_id' => $parentId]);
 
-        // --- PART 2: 重建 threadify_threads ---
-        // 清空旧数据
-        $db->table($tableLogical)->truncate();
+                $results['parent_id_updated']++;
+            } else {
+                $results['parent_id_skipped']++;
+            }
+        }
 
-        // 以讨论 & 时间升序遍历，尽量保证父先子后
-        $all = $db->table('posts')
-            ->where('type', 'comment')
-            ->orderBy('discussion_id')
-            ->orderBy('created_at')
-            ->get();
+        // --- PART 2: 重建 threadify_threads ---
+        // 清空旧数据
+        $db->table($tableLogical)->truncate();
 
-        // [!! OPTIMIZED !!] 优化 N+1 查询：
-        // 创建一个 Map 来在内存中存储已处理的父帖，而不是在循环中查询数据库
-        $parentThreadsMap = collect();
+        // 以讨论 & 时间升序遍历，尽量保证父先子后
+        $all = $db->table('posts')
+            ->where('type', 'comment')
+            ->orderBy('discussion_id')
+            ->orderBy('created_at')
+            ->get();
 
-        foreach ($all as $post) {
-            try {
-                $parentId   = $post->parent_id;
-                // [!! OPTIMIZED !!] 传入 $parentThreadsMap，从内存读取
-                $threadData = self::calculateThreadData($parentThreadsMap, $post, $parentId);
+        // [!! OPTIMIZED !!] 优化 N+1 查询：
+        // 创建一个 Map 来在内存中存储已处理的父帖，而不是在循环中查询数据库
+        $parentThreadsMap = collect();
 
-                $inserted = [
-                    'discussion_id'   => $post->discussion_id,
-                    'post_id'         => $post->id,
-                    'parent_post_id'  => $parentId,
-                    'root_post_id'    => $threadData['root_post_id'],
-                    'depth'           => $threadData['depth'],
-                    'thread_path'     => $threadData['thread_path'],
-                    'child_count'     => 0,
-                    'descendant_count'=> 0,
-                    'created_at'      => $post->created_at,
-                    'updated_at'      => $post->created_at,
-                ];
+        foreach ($all as $post) {
+            try {
+                $parentId = $post->parent_id;
+                // [!! OPTIMIZED !!] 传入 $parentThreadsMap，从内存读取
+                $threadData = self::calculateThreadData($parentThreadsMap, $post, $parentId);
 
-                $db->table($tableLogical)->insert($inserted);
+                $inserted = [
+                    'discussion_id'    => $post->discussion_id,
+                    'post_id'          => $post->id,
+                    'parent_post_id'   => $parentId,
+                    'root_post_id'     => $threadData['root_post_id'],
+                    'depth'            => $threadData['depth'],
+                    'thread_path'      => $threadData['thread_path'],
+                    'child_count'      => 0,
+                    'descendant_count' => 0,
+                    'created_at'       => $post->created_at,
+                    'updated_at'       => $post->created_at,
+                ];
 
-                // [!! OPTIMIZED !!] 将刚插入的数据放入 Map，供后续的子帖查找
-                $parentThreadsMap->put($post->id, (object)$inserted);
+                $db->table($tableLogical)->insert($inserted);
 
-                $results['threads_processed']++;
-            } catch (\Throwable $e) {
-                $results['threads_errors']++;
-            }
-        }
+                // [!! OPTIMIZED !!] 将刚插入的数据放入 Map，供后续的子帖查找
+                $parentThreadsMap->put($post->id, (object) $inserted);
 
-        // --- PART 3: 统计 child_count / descendant_count ---
-        // 3.1 子数（使用 raw SQL，但带上前缀的物理表名）
-        $db->statement("
-            UPDATE {$tablePrefixed} t1
-            INNER JOIN (
-                SELECT parent_post_id, COUNT(*) AS cnt
-                FROM {$tablePrefixed}
-                WHERE parent_post_id IS NOT NULL
-                GROUP BY parent_post_id
-            ) t2 ON t1.post_id = t2.parent_post_id
-            SET t1.child_count = t2.cnt
-        ");
+                $results['threads_processed']++;
+            } catch (\Throwable $e) {
+                $results['threads_errors']++;
+            }
+        }
 
-        // 3.2 根节点后代数（同上）
-        $db->statement("
-            UPDATE {$tablePrefixed} t1
-            INNER JOIN (
-                SELECT root_post_id, COUNT(*) - 1 AS cnt
-                FROM {$tablePrefixed}
-                GROUP BY root_post_id
-            ) t2 ON t1.post_id = t2.root_post_id
-            SET t1.descendant_count = t2.cnt
-            WHERE t1.parent_post_id IS NULL
-        ");
+        // --- PART 3: 统计 child_count / descendant_count ---
+        // 3.1 子数（使用 raw SQL，但带上前缀的物理表名）
+        $db->statement("
+            UPDATE {$tablePrefixed} t1
+            INNER JOIN (
+                SELECT parent_post_id, COUNT(*) AS cnt
+                FROM {$tablePrefixed}
+                WHERE parent_post_id IS NOT NULL
+                GROUP BY parent_post_id
+            ) t2 ON t1.post_id = t2.parent_post_id
+            SET t1.child_count = t2.cnt
+        ");
 
-        // 3.3 非根节点后代数：用 Query Builder（自动前缀）
-        $threads = $db->table($tableLogical)->whereNotNull('parent_post_id')->get(['id', 'thread_path']);
-        foreach ($threads as $thread) {
-            $descendantCount = $db->table($tableLogical)
-                ->where('thread_path', 'LIKE', $thread->thread_path . '/%')
-                ->count();
+        // 3.2 根节点后代数（同上）
+        $db->statement("
+            UPDATE {$tablePrefixed} t1
+            INNER JOIN (
+                SELECT root_post_id, COUNT(*) - 1 AS cnt
+                FROM {$tablePrefixed}
+                GROUP BY root_post_id
+            ) t2 ON t1.post_id = t2.root_post_id
+            SET t1.descendant_count = t2.cnt
+            WHERE t1.parent_post_id IS NULL
+        ");
 
-            $db->table($tableLogical)
-                ->where('id', $thread->id)
-                ->update(['descendant_count' => $descendantCount]);
-        }
+        // 3.3 非根节点后代数：用 Query Builder（自动前缀）
+        $threads = $db->table($tableLogical)
+            ->whereNotNull('parent_post_id')
+            ->get(['id', 'thread_path']);
 
-        $results['child_descendant_counts_updated'] = true;
+        foreach ($threads as $thread) {
+            $descendantCount = $db->table($tableLogical)
+                ->where('thread_path', 'LIKE', $thread->thread_path . '/%')
+                ->count();
 
-        return new JsonResponse(['status' => 'ok', 'results' => $results]);
-    }
+            $db->table($tableLogical)
+                ->where('id', $thread->id)
+                ->update(['descendant_count' => $descendantCount]);
+        }
 
-    /* -------------------- Helpers -------------------- */
+        $results['child_descendant_counts_updated'] = true;
 
-    private static function extractParentFromContent($content): ?int
-    {
-        if (!$content) return null;
+        return new JsonResponse([
+            'status'  => 'ok',
+            'results' => $results,
+        ]);
+    }
 
-        // <POSTMENTION ... id="123" ...>
-        if (preg_match('/<POSTMENTION[^>]+id=\"(\d+)\"[^>]*>/', $content, $m)) {
-            return (int) $m[1];
-        }
-        // class="...PostMention..." data-id="123"
-        if (preg_match('/<[^>]+class=\"[^\"]*PostMention[^\"]*\"[^>]+data-id=\"(\d+)\"[^>]*>/', $content, $m)) {
-            return (int) $m[1];
-        }
-        // @"Display Name"#p123
-        if (preg_match('/@\"[^\"]*\"#p(\d+)/', $content, $m)) {
-            return (int) $m[1];
-        }
+    /* -------------------- Helpers -------------------- */
 
-        return null;
-        }
+    private static function extractParentFromContent($content): ?int
+    {
+        if (! $content) {
+            return null;
+        }
 
-    // [!! OPTIMIZED !!] 优化：签名已更改，以从内存 Map 读取，而不是查询数据库
-    private static function calculateThreadData($parentThreadsMap, $post, ?int $parentId): array
-    {
-        if (!$parentId) {
-            return [
-                'root_post_id' => (int) $post->id,
-                'depth'        => 0,
-                'thread_path'  => (string) $post->id,
-            ];
-        }
+        // <POSTMENTION ... id="123" ...>
+        if (preg_match('/<POSTMENTION[^>]+id=\"(\d+)\"[^>]*>/', $content, $m)) {
+            return (int) $m[1];
+        }
+        // class="...PostMention..." data-id="123"
+        if (preg_match('/<[^>]+class=\"[^\"]*PostMention[^\"]*\"[^>]+data-id=\"(\d+)\"[^>]*>/', $content, $m)) {
+            return (int) $m[1];
+        }
+        // @"Display Name"#p123
+        if (preg_match('/@\"[^\"]*\"#p(\d+)/', $content, $m)) {
+            return (int) $m[1];
+        }
 
-        // [!! OPTIMIZED !!] 优化：从 Map 读取，而不是 DB
-        $parentThread = $parentThreadsMap->get($parentId);
+        return null;
+    }
 
-        if (!$parentThread) {
-            // 父记录尚未入表：作为根处理（后续统计不受影响）
-            return [
-                'root_post_id' => (int) $post->id,
-                'depth'        => 0,
-                'thread_path'  => (string) $post->id,
-            ];
-        }
+    // [!! OPTIMIZED !!] 优化：签名已更改，以从内存 Map 读取，而不是查询数据库
+    private static function calculateThreadData($parentThreadsMap, $post, ?int $parentId): array
+    {
+        if (! $parentId) {
+            return [
+                'root_post_id' => (int) $post->id,
+                'depth'        => 0,
+                'thread_path'  => (string) $post->id,
+            ];
+        }
 
-        return [
-            'root_post_id' => (int) $parentThread->root_post_id,
-            'depth'        => (int) $parentThread->depth + 1,
-            'thread_path'  => (string) ($parentThread->thread_path . '/' . $post->id),
-        ];
-    }
+        // [!! OPTIMIZED !!] 优化：从 Map 读取，而不是 DB
+        $parentThread = $parentThreadsMap->get($parentId);
+
+        if (! $parentThread) {
+            // 父记录尚未入表：作为根处理（后续统计不受影响）
+            return [
+                'root_post_id' => (int) $post->id,
+                'depth'        => 0,
+                'thread_path'  => (string) $post->id,
+            ];
+        }
+
+        return [
+            'root_post_id' => (int) $parentThread->root_post_id,
+            'depth'        => (int) $parentThread->depth + 1,
+            'thread_path'  => (string) ($parentThread->thread_path . '/' . $post->id),
+        ];
+    }
 }
