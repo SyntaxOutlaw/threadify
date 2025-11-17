@@ -27,13 +27,12 @@ class SavePostToThreadifyTable
             }
             
             // Create new thread entry
-post)
             ThreadifyThread::createForPost($post, $post->parent_id);
             
         } catch (\Exception $e) {
             // [!! OPTIMIZED !!] Removed log, but kept error handling
             // In a real production app, you would log this to a proper Flarum log
             resolve('log')->error('[Threadify] ❌ Failed to create thread entry for post ' . $post->id . ': ' . $e->getMessage());
-        }
+        }
     }
 }
