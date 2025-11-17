@@ -88,7 +88,7 @@ class ListDiscussionThreadsOrderController implements RequestHandlerInterface
                 $order[] = [
                     'postId'       => (int) $node->post_id,
                     'order'        => 0, // 稍后写入序号
-    _B_B__             'depth'        => (int) $node->depth,
+                    'depth'        => (int) $node->depth,
                     'parentPostId' => $node->parent_post_id ? (int) $node->parent_post_id : null,
                 ];
                 $children = $byParent[$node->post_id] ?? [];
@@ -97,7 +97,7 @@ class ListDiscussionThreadsOrderController implements RequestHandlerInterface
                     foreach ($children as $ch) {
                         $dfs($ch);
                     }
-                }
+          _B_B_   }
             };
 
             $roots = $byParent[0] ?? [];
