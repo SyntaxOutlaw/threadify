@@ -444,13 +444,6 @@ export function installDomReorderMode() {
     this.__threadifyDomObserver = observer;
   });
 
-  extend(PostStream.prototype, 'onupdate', function () {
-    const did = getDidFromComponent(this);
-    const container = getContainer(this);
-    if (!did || !container) return;
-    reorderOnce(container, did);
-  });
-
   extend(PostStream.prototype, 'onremove', function () {
     if (this.__threadifyDomObserver) {
       try { this.__threadifyDomObserver.disconnect(); } catch {}
@@ -463,3 +456,4 @@ export function installDomReorderMode() {
     window.addEventListener('threadify:order-ready', () => scheduleRedraw());
   } catch {}
 }
+
