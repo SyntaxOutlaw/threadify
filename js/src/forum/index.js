@@ -3,12 +3,11 @@ import { extend } from 'flarum/common/extend';
 
 import DiscussionPage from 'flarum/forum/components/DiscussionPage';
 import DiscussionListItem from 'flarum/forum/components/DiscussionListItem';
+import Post from 'flarum/forum/components/Post'; // [ADDED] 需要引用 Post 组件来应用同步样式
 
-// import { initThreadedPost } from './components/ThreadedPost'; // [REMOVED] 统一到 DomReorderMode
 import { initThreadedReplyComposer } from './components/ThreadedReplyComposer';
-
 import { installDomReorderMode } from './utils/DomReorderMode';
-import { prefetchThreadOrder } from './utils/ThreadOrderPrefetch'; // 你已有的轻量预取，可继续用来提升首屏命中
+import { prefetchThreadOrder, getDepthPrefetched } from './utils/ThreadOrderPrefetch'; // [MODIFIED] 引入 getDepthPrefetched 用于同步读取
 
 // 可选：控制 Threadify 日志的开/关（保持你之前的实现）
 (function setupThreadifyLoggingToggle() {
@@ -60,8 +59,29 @@ app.initializers.add('syntaxoutlaw-threadify', () => {
   // 1) 提交时自动带上 parent_id（你的已有逻辑）
   initThreadedReplyComposer();
 
-  // 2) [REMOVED] (逻辑已统一到 DomReorderMode)
-  // initThreadedPost();
+  // 2) [OPTIMIZED] 极简版：Mithril 层同步应用缩进类 (消除闪烁)
+  // 这利用了我们统一的高效缓存，不会造成双重计算的性能负担，且保证首屏渲染即缩进。
+  extend(Post.prototype, 'elementAttrs', function(attrs) {
+    const post = this.attrs.post;
+    if (!post) return;
+
+    // 尝试从统一缓存中直接获取深度 (同步操作，O(1) 复杂度)
+    const did = post.discussion() ? post.discussion().id() : null;
+    if (!did) return;
+
+    const depth = getDepthPrefetched(did, post.id());
+
+    // 如果缓存命中且深度 > 0，直接在渲染前应用 CSS
+    if (Number.isInteger(depth) && depth > 0) {
+      const safeDepth = Math.min(depth, 10); // MAX_DEPTH
+      const classes = ['threaded-post', `thread-depth-${safeDepth}`];
+      if (safeDepth >= 3) classes.push('thread-deep');
+      if (safeDepth >= 5) classes.push('thread-very-deep');
+
+      // 合并到现有的 className 中
+      attrs.className = (attrs.className || '') + ' ' + classes.join(' ');
+    }
+  });
 
   // 3) 安装“DOM 物理重排 + 观察器”模式（核心）
   installDomReorderMode();
