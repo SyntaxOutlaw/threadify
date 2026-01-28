@@ -83,6 +83,9 @@ class RebuildParentIdsController implements RequestHandlerInterface
 
         // --- PART 3: Update child and descendant counts ---
         // Update child counts
+        // get prefix an concat with $tableName
+        $prefix = $db->getTablePrefix();
+        $tableName = $prefix . $tableName;
         $db->statement("
             UPDATE {$tableName} t1
             INNER JOIN (
