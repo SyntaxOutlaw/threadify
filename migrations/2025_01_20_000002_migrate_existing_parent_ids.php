@@ -1,90 +1,92 @@
 <?php
 
-use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Database\Schema\Builder;
 
-function extractParentFromContent($content) {
+function extractParentFromContent($content): ?int {
     if (!$content) return null;
-    
-    try {
-        // Look for <POSTMENTION id="X"> pattern
-        if (preg_match('/<POSTMENTION[^>]+id="(\d+)"[^>]*>/', $content, $matches)) {
-            return (int)$matches[1];
-        }
-        
-        // Look for PostMention data-id pattern  
-        if (preg_match('/<[^>]+class="[^"]*PostMention[^"]*"[^>]+data-id="(\d+)"[^>]*>/', $content, $matches)) {
-            return (int)$matches[1];
-        }
-        
-        // Look for @"username"#pX pattern and extract X
-        if (preg_match('/@"[^"]*"#p(\d+)/', $content, $matches)) {
-            return (int)$matches[1];
-        }
-        
-        return null;
-    } catch (\Exception $e) {
-        echo "Error extracting parent from content: " . $e->getMessage() . "\n";
-        return null;
+
+    // <POSTMENTION id="X">
+    if (preg_match('/<POSTMENTION[^>]+id="(\d+)"[^>]*>/', $content, $m)) {
+        return (int) $m[1];
     }
+
+    // class="...PostMention..." data-id="X"
+    if (preg_match('/<[^>]+class="[^"]*PostMention[^"]*"[^>]+data-id="(\d+)"[^>]*>/', $content, $m)) {
+        return (int) $m[1];
+    }
+
+    // @"username"#pX
+    if (preg_match('/@"[^"]*"#p(\d+)/', $content, $m)) {
+        return (int) $m[1];
+    }
+
+    return null;
 }
 
 return [
     'up' => function (Builder $schema) {
         $connection = $schema->getConnection();
-        
-        // Ensure the parent_id column exists before proceeding
+        $postsTable = 'posts';
+        $prefix = $connection->getTablePrefix();
+
+        // Schema checks are prefix-safe already, keep them
         if (!$schema->hasColumn('posts', 'parent_id')) {
-            echo "Error: parent_id column does not exist in posts table. Please ensure migration 2025_01_20_000001_add_parent_id_to_posts.php has been run first.\n";
+            resolve('log')->error('[Threadify] parent_id column missing on '.$prefix.$postsTable.' table; run the add_parent_id migration first.');
             return;
         }
-        
-        // Get all posts that don't have parent_id set
-        $posts = $connection->table('posts')
-            ->whereNull('parent_id')
-            ->where('type', 'comment')
-            ->get();
-        
+
         $updated = 0;
         $skipped = 0;
-        
-        foreach ($posts as $post) {
-            try {
-                $parentId = extractParentFromContent($post->content);
-                
-                if ($parentId) {
-                    // Verify the parent post exists and is in the same discussion
-                    $parentExists = $connection->table('posts')
-                        ->where('id', $parentId)
-                        ->where('discussion_id', $post->discussion_id)
-                        ->exists();
-                    
-                    if ($parentExists) {
-                        $connection->table('posts')
+
+        // Chunk to avoid loading everything at once
+        $connection->table($postsTable)
+            ->select(['id', 'discussion_id', 'content'])
+            ->whereNull('parent_id')
+            ->where('type', 'comment')
+            ->orderBy('id')
+            ->chunkById(500, function ($posts) use ($connection, $postsTable, &$updated, &$skipped) {
+                foreach ($posts as $post) {
+                    try {
+                        $parentId = extractParentFromContent($post->content);
+
+                        if (!$parentId) {
+                            continue;
+                        }
+
+                        // Verify parent exists in same discussion
+                        $parentExists = $connection->table($postsTable)
+                            ->where('id', $parentId)
+                            ->where('discussion_id', $post->discussion_id)
+                            ->exists();
+
+                        if (!$parentExists) {
+                            $skipped++;
+                            continue;
+                        }
+
+                        $connection->table($postsTable)
                             ->where('id', $post->id)
                             ->update(['parent_id' => $parentId]);
+
                         $updated++;
-                    } else {
+                    } catch (\Throwable $e) {
                         $skipped++;
+                        resolve('log')->warning("[Threadify] Error processing post {$prefix}{$postsTable}.id={$post->id}: {$e->getMessage()}");
                     }
                 }
-            } catch (\Exception $e) {
-                echo "Error processing post {$post->id}: " . $e->getMessage() . "\n";
-                $skipped++;
-            }
-        }
-        
-        echo "Migration completed: Updated {$updated} posts, skipped {$skipped} invalid references\n";
+            });
+
+        resolve('log')->info("[Threadify] Parent extraction migration complete. Updated={$updated}, skipped={$skipped} on {$prefix}{$postsTable} table");
     },
-    
+
     'down' => function (Builder $schema) {
-        // Revert by setting all parent_id back to NULL for migrated posts
         $connection = $schema->getConnection();
-        
-        $connection->table('posts')
+        $postsTable = 'posts';
+        $prefix = $connection->getTablePrefix();
+        $affected = $connection->table($postsTable)
             ->whereNotNull('parent_id')
             ->update(['parent_id' => null]);
-        
-        echo "Reverted: Set all parent_id values back to NULL\n";
+
+        resolve('log')->info("[Threadify] Reverted parent_id to NULL on {$affected} posts on {$prefix}{$postsTable} table");
     }
 ];

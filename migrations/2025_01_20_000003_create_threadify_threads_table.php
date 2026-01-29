@@ -5,90 +5,87 @@ use Illuminate\Database\Schema\Blueprint;
 
 return [
     'up' => function (Builder $schema) {
+        $connection = $schema->getConnection();
+        $prefix = $connection->getTablePrefix();
+        $threadsTable = 'threadify_threads';
+        $postsTable = 'posts';
+        $discussionsTable = 'discussions';
+
+        // These are prefix-safe because Schema Builder applies prefix internally.
+        if (!$schema->hasTable($postsTable) || !$schema->hasTable($discussionsTable)) {
+            resolve('log')->error('[Threadify] Required Flarum tables missing ('.$prefix.$postsTable.'/'.$prefix.$discussionsTable.'). Is Flarum installed?');
+            return;
+        }
+
+        if ($schema->hasTable($threadsTable)) {
+            resolve('log')->info('[Threadify] '.$prefix.$threadsTable.' already exists; skipping creation.');
+            return;
+        }
+
+        resolve('log')->info('[Threadify] Creating '.$prefix.$threadsTable.' table…');
+
         try {
-            $connection = $schema->getConnection();
-            
-            // Test database connection
-            $connection->getPdo();
-            echo "Database connection successful\n";
-        } catch (\Exception $e) {
-            echo "Error connecting to database: " . $e->getMessage() . "\n";
-            return;
-        }
-        
-        // Get the proper table name with prefix
-        $tableName = $schema->getConnection()->getTablePrefix() . 'threadify_threads';
-        
-        // Check if required Flarum tables exist
-        if (!$schema->hasTable('posts')) {
-            echo "Error: posts table does not exist. This extension requires Flarum to be properly installed.\n";
-            return;
-        }
-        
-        if (!$schema->hasTable('discussions')) {
-            echo "Error: discussions table does not exist. This extension requires Flarum to be properly installed.\n";
-            return;
-        }
-        
-        // Check if the table already exists
-        try {
-            $connection->select("SELECT 1 FROM {$tableName} LIMIT 1");
-            echo "Table {$tableName} already exists, skipping creation.\n";
-            return;
-        } catch (\Exception $e) {
-            // Table doesn't exist, proceed with creation
-        }
-        
-        echo "Creating {$tableName} table...\n";
-        
-        try {
-            // Create the table
-            $schema->create('threadify_threads', function ($table) use ($schema) {
+            $schema->create($threadsTable, function (Blueprint $table) {
                 $table->id();
+
                 $table->unsignedInteger('discussion_id');
                 $table->unsignedInteger('post_id');
+
                 $table->unsignedInteger('parent_post_id')->nullable();
                 $table->unsignedInteger('root_post_id');
+
                 $table->unsignedSmallInteger('depth')->default(0);
                 $table->string('thread_path', 500);
+
                 $table->unsignedInteger('child_count')->default(0);
                 $table->unsignedInteger('descendant_count')->default(0);
+
                 $table->timestamps();
-                
-                // Foreign key constraints - only add if the referenced tables exist
-                if ($schema->hasTable('discussions')) {
-                    $table->foreign('discussion_id')->references('id')->on('discussions')->onDelete('cascade');
-                }
-                if ($schema->hasTable('posts')) {
-                    $table->foreign('post_id')->references('id')->on('posts')->onDelete('cascade');
-                    $table->foreign('parent_post_id')->references('id')->on('posts')->onDelete('cascade');
-                    $table->foreign('root_post_id')->references('id')->on('posts')->onDelete('cascade');
-                }
-                
-                // Indexes for performance
+
+                // Indexes
                 $table->index('discussion_id');
-                $table->index('post_id');
+                $table->unique('post_id');
                 $table->index('parent_post_id');
                 $table->index('root_post_id');
                 $table->index('thread_path');
-                $table->index(['discussion_id', 'thread_path']); // Compound index for main query
-                
-                // Unique constraint - each post can only have one thread entry
-                $table->unique('post_id');
+                $table->index(['discussion_id', 'thread_path']);
             });
-            
-            echo "✅ {$tableName} table created successfully.\n";
-        } catch (\Exception $e) {
-            echo "❌ Error creating {$tableName} table: " . $e->getMessage() . "\n";
-            return;
+
+            // Add FKs in a separate step (cleaner + avoids edge cases during create)
+            $schema->table($threadsTable, function (Blueprint $table) {
+                $table->foreign('discussion_id')->references('id')->on('discussions')->onDelete('cascade');
+
+                $table->foreign('post_id')->references('id')->on('posts')->onDelete('cascade');
+                $table->foreign('parent_post_id')->references('id')->on('posts')->onDelete('cascade');
+                $table->foreign('root_post_id')->references('id')->on('posts')->onDelete('cascade');
+            });
+
+            resolve('log')->info('[Threadify] '.$prefix.$threadsTable.' created successfully.');
+        } catch (\Throwable $e) {
+            resolve('log')->error('[Threadify] Error creating '.$prefix.$threadsTable.': ' . $e->getMessage());
+            throw $e; // Let Flarum show a proper error rather than silently “succeed”
         }
     },
-    
+
     'down' => function (Builder $schema) {
-        // Drop the threadify_threads table completely
-        if ($schema->hasTable('threadify_threads')) {
-            $schema->drop('threadify_threads');
-            echo "Dropped threadify_threads table\n";
+        $connection = $schema->getConnection();
+        $prefix = $connection->getTablePrefix();
+        $threadsTable = 'threadify_threads';
+        // Drop table (Schema Builder handles prefixes)
+        if ($schema->hasTable($threadsTable)) {
+            try {
+                $schema->table($threadsTable, function (Blueprint $table) {
+                    $table->dropForeign(['discussion_id']);
+                    $table->dropForeign(['post_id']);
+                    $table->dropForeign(['parent_post_id']);
+                    $table->dropForeign(['root_post_id']);
+                });
+            } catch (\Throwable $e) {
+                resolve('log')->warning('[Threadify] Could not drop foreign keys before drop on '.$prefix.$threadsTable.' table: ' . $e->getMessage());
+            }
+
+            $schema->dropIfExists($threadsTable);
+            resolve('log')->info('[Threadify] Dropped '.$prefix.$threadsTable.' table.');
         }
     }
-]; 
+];
