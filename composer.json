@@ -7,9 +7,6 @@
         "flarum/core": "^1.8.0",
         "flarum/mentions": "^1.8.0"
     },
-    "require-dev": {
-        "flarum/testing": "^1.8.0"
-    },
     "autoload": {
         "psr-4": {
             "SyntaxOutlaw\\Threadify\\": "src/"
