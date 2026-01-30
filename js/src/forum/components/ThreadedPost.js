@@ -33,7 +33,6 @@ export function initThreadedPost() {
     
     // Get threading CSS classes from simplified utility
     const threadClasses = getThreadCssClasses(post);
-    console.log(`[Threadify] Adding classes to post ${post.id()}: ${threadClasses.join(', ')}`);
     
     threadClasses.forEach(className => {
       classes.push(className);

@@ -25,38 +25,35 @@ export function buildThreadTree(posts) {
   const tree = [];
   const postMap = new Map();
   const childrenMap = new Map();
-  
-  // First pass: create post map and initialize children arrays
+  const id = (p) => (p && typeof p.id === 'function' ? String(p.id()) : String(p));
+
+  // First pass: create post map and initialize children arrays (use string keys for consistency)
   posts.forEach(post => {
     if (!post) return;
-    
-    const postId = post.id();
+    const postId = id(post);
     postMap.set(postId, post);
     childrenMap.set(postId, []);
   });
-  
+
   // Second pass: organize posts by parent-child relationships
   posts.forEach(post => {
     if (!post) return;
-    
-    const postId = post.id();
-    const parentId = post.attribute('parent_id');
-    
-    if (parentId && postMap.has(String(parentId))) {
-      // This post has a parent, add it to parent's children
-      childrenMap.get(String(parentId)).push(post);
+    const parentId = post.attribute('parent_id') ?? post._parentPostId;
+    const parentKey = parentId != null ? String(parentId) : null;
+
+    if (parentKey && postMap.has(parentKey)) {
+      childrenMap.get(parentKey).push(post);
     } else {
-      // This is a root post (no parent or parent not found)
       tree.push(post);
     }
   });
-  
+
   // Third pass: attach children to posts for easy access
   posts.forEach(post => {
     if (!post) return;
-    post._threadChildren = childrenMap.get(post.id()) || [];
+    post._threadChildren = childrenMap.get(id(post)) || [];
   });
-  
+
   return tree;
 }
 

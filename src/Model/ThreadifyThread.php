@@ -156,14 +156,50 @@ class ThreadifyThread extends AbstractModel
     }
     
     /**
-     * Get all threads for a discussion in proper threaded order
+     * Get all threads for a discussion in proper threaded order.
+     * Order: root posts by created_at, then each root's descendants depth-first
+     * with children at each level sorted by created_at (chronological).
      */
     public static function getDiscussionThreads(int $discussionId)
     {
-        return self::where('discussion_id', $discussionId)
+        $threads = self::where('discussion_id', $discussionId)
             ->with(['post', 'post.user'])
-            ->orderBy('thread_path')
             ->get();
+
+        if ($threads->isEmpty()) {
+            return $threads;
+        }
+
+        // Group children by parent_post_id (null = roots)
+        $childrenByParent = $threads->groupBy('parent_post_id');
+
+        // Root threads (no parent) sorted by post created_at
+        $roots = ($childrenByParent->get(null) ?? collect())
+            ->sortBy(fn ($t) => $t->post ? $t->post->created_at->timestamp : 0);
+
+        $result = collect();
+        foreach ($roots as $root) {
+            $result = $result->merge(self::collectSubtreeInOrder($root, $childrenByParent));
+        }
+
+        return $result->values();
+    }
+
+    /**
+     * Collect a thread and all its descendants in depth-first order,
+     * with children at each level sorted by post created_at.
+     */
+    private static function collectSubtreeInOrder(self $thread, $childrenByParent)
+    {
+        $result = collect([$thread]);
+        $children = ($childrenByParent->get($thread->post_id) ?? collect())
+            ->sortBy(fn ($t) => $t->post ? $t->post->created_at->timestamp : 0);
+
+        foreach ($children as $child) {
+            $result = $result->merge(self::collectSubtreeInOrder($child, $childrenByParent));
+        }
+
+        return $result;
     }
     
     /**

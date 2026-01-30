@@ -16,11 +16,11 @@
  * - components/: Flarum component extensions (PostStream, Post, ReplyComposer)
  * 
  * @author Threadify Extension
- * @version 1.0.6
+ * @version 1.1
  */
 
 // Import utility modules
-import { initSimplifiedThreadedPostStream, getThreadingState, reloadThreads, isThreadingActive } from './components/SimplifiedThreadedPostStream';
+import { initThreadedPostStream, getThreadingState, reloadThreads, isThreadingActive } from './components/ThreadedPostStream';
 import { initThreadedPost } from './components/ThreadedPost';
 import { initThreadedReplyComposer } from './components/ThreadedReplyComposer';
 
@@ -33,11 +33,11 @@ import { initThreadedReplyComposer } from './components/ThreadedReplyComposer';
 app.initializers.add('syntaxoutlaw-threadify', () => {
   try {
     // Initialize all threading components with simplified API-based approach
-    initSimplifiedThreadedPostStream();  // Simplified post threading via API
+    initThreadedPostStream();  // Threaded post threading via API
     initThreadedPost();                  // Post CSS classes and visual elements  
     initThreadedReplyComposer();         // Parent ID extraction from mentions
     
-    console.log('[Threadify] Simplified extension loaded');
+    console.log('[Threadify] Threaded extension loaded');
     
     // Add global debugging utilities for troubleshooting
     window.threadifyDebug = {
@@ -46,17 +46,31 @@ app.initializers.add('syntaxoutlaw-threadify', () => {
       isActive: isThreadingActive,
       help: () => {
         console.log(`
-[Threadify] Simplified Debug Commands:
+[Threadify] Debug Commands:
 - threadifyDebug.getState() - Get current threading state
 - threadifyDebug.reload() - Force reload threads for current discussion
 - threadifyDebug.isActive() - Check if threading is currently active
+- threadifyDebug.diagnose() - Log why order might be wrong on this page
 - threadifyDebug.help() - Show this help
-
-New System: Uses pre-computed threads from backend API
-- Single API call instead of complex frontend logic
-- Pre-computed thread paths and depths
-- Much more reliable and performant
         `);
+      },
+      diagnose: () => {
+        const discussion = app.current.get('discussion');
+        const state = getThreadingState();
+        const byId = discussion ? app.store.getById('discussions', String(discussion.id())) || app.store.getById('discussions', Number(discussion.id())) : null;
+        const postIds = discussion ? (discussion.postIds && discussion.postIds()) : null;
+        console.log('[Threadify] Diagnose:', {
+          state,
+          hasCurrentDiscussion: !!discussion,
+          discussionId: discussion ? discussion.id() : null,
+          discussionInStore: !!byId,
+          sameObject: discussion === byId,
+          postIdsLength: postIds ? postIds.length : 0,
+          postIdsFirstFive: postIds ? postIds.slice(0, 5) : null,
+          relationshipOrder: discussion && discussion.data && discussion.data.relationships && discussion.data.relationships.posts
+            ? discussion.data.relationships.posts.data.slice(0, 5).map(x => x.id)
+            : null
+        });
       }
     };
     
@@ -87,7 +101,7 @@ export { getThreadedPostsCache, isThreadingActive } from './components/ThreadedP
  */
 export function getThreadifyStatus() {
   return {
-    version: '1.0.6',
+    version: '1.1',
     name: 'Threadify',
     author: 'syntaxoutlaw',
     isActive: true,
