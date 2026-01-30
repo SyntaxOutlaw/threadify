@@ -30,24 +30,18 @@ export function loadDiscussionThreads(discussionId) {
     
     // Process included data first to populate the store
     if (response.included) {
-      console.log(`[Threadify] Processing ${response.included.length} included items`);
+      console.log(`[Threadify] Processing ${response.included.length} posts`);
       response.included.forEach(item => {
-        console.log(`[Threadify] Including ${item.type}:${item.id}`);
         app.store.pushObject(item);
       });
     }
     
     // Convert thread data to posts with threading metadata
-    const threadedPosts = response.data.map(threadData => {
-      // Find the post in Flarum's store
+    const postsFromApi = response.data.map(threadData => {
       const postId = threadData.attributes.postId;
       let post = app.store.getById('posts', postId);
-      
+
       if (post) {
-        // Debug: Check if post has user relationship
-        console.log(`[Threadify] Post ${postId} found, user:`, post.user ? post.user() : 'NO USER');
-        
-        // Add threading metadata to the post
         post._threadDepth = threadData.attributes.depth;
         post._threadPath = threadData.attributes.threadPath;
         post._isRoot = threadData.attributes.isRoot;
@@ -55,18 +49,15 @@ export function loadDiscussionThreads(discussionId) {
         post._descendantCount = threadData.attributes.descendantCount;
         post._rootPostId = threadData.attributes.rootPostId;
         post._parentPostId = threadData.attributes.parentPostId;
-        
-        console.log(`[Threadify] Post ${postId} depth: ${post._threadDepth}, path: ${post._threadPath}`);
-      } else {
-        console.warn(`[Threadify] Post ${postId} not found in store`);
       }
-      
+
       return post;
-    }).filter(post => post !== null); // Filter out any null posts
-    
-    console.log(`[Threadify] Processed ${threadedPosts.length} threaded posts`);
-    
-    return threadedPosts;
+    }).filter(post => post !== null);
+
+    // API returns threads in correct threaded order (backend getDiscussionThreads).
+    // Use that order as-is; no frontend reordering.
+    console.log(`[Threadify] Processed ${postsFromApi.length} threaded posts (API order)`);
+    return postsFromApi;
   }).catch(error => {
     console.error('[Threadify] Failed to load discussion threads:', error);
     
