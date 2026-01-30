@@ -52,6 +52,14 @@ function applyThreadedOrderToDiscussion(discussionId, postsInOrder) {
   if (!discussion.data.relationships) discussion.data.relationships = {};
   discussion.data.relationships.posts = { data };
   discussion.freshness = new Date();
+
+  // Force the stream to report "viewing end" so core shows the reply placeholder.
+  const stream = app.current.get('stream');
+  if (stream && stream.discussion === discussion) {
+    stream.viewingEnd = function() {
+      return true;
+    };
+  }
 }
 
 function loadThreadsForDiscussion(discussionId) {
@@ -106,8 +114,14 @@ export function initThreadedPostStream() {
       threadsLoaded = false;
       threadedPosts = null;
     }
-    if (shouldUseThreadsApi(stream.discussion) && !threadsLoaded) {
-      loadThreadsForDiscussion(discussionId);
+    if (shouldUseThreadsApi(stream.discussion)) {
+      // Force "viewing end" so core shows the reply placeholder (our comment-only order breaks viewingEnd).
+      stream.viewingEnd = function() {
+        return true;
+      };
+      if (!threadsLoaded) {
+        loadThreadsForDiscussion(discussionId);
+      }
     }
   });
 
