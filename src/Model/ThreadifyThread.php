@@ -13,7 +13,7 @@ class ThreadifyThread extends AbstractModel
     /**
      * Maximum allowed thread depth to prevent excessively deep nesting
      */
-    public const MAX_DEPTH = 20;
+    public const MAX_DEPTH = 10;
 
     protected $fillable = [
         'discussion_id',
