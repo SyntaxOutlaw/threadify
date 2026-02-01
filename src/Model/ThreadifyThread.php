@@ -10,6 +10,11 @@ class ThreadifyThread extends AbstractModel
 {
     protected $table = 'threadify_threads';
 
+    /**
+     * Maximum allowed thread depth to prevent excessively deep nesting
+     */
+    public const MAX_DEPTH = 20;
+
     protected $fillable = [
         'discussion_id',
         'post_id',
@@ -107,7 +112,7 @@ class ThreadifyThread extends AbstractModel
             } else {
                 $threadPath = $parentThread->thread_path . '/' . $post->id;
                 $rootPostId = $parentThread->root_post_id;
-                $depth      = $parentThread->depth + 1;
+                $depth      = min($parentThread->depth + 1, self::MAX_DEPTH);
             }
         }
 

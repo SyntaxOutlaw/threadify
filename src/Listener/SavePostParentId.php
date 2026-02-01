@@ -3,13 +3,12 @@
 namespace SyntaxOutlaw\Threadify\Listener;
 
 use Flarum\Post\Event\Saving;
+use Flarum\Post\Post;
 
 class SavePostParentId
 {
-    public function handle(Saving $event)
+    public function handle(Saving $event): void
     {
-        // [!! OPTIMIZED !!] Removed all error_log calls
-
         $post = $event->post;
         $data = $event->data;
 
@@ -24,7 +23,16 @@ class SavePostParentId
         }
 
         if ($parentId && is_numeric($parentId) && $parentId > 0) {
-            $post->parent_id = (int) $parentId;
+            $parentId = (int) $parentId;
+
+            // 验证父帖是否存在于同一讨论中
+            $parentExists = Post::where('id', $parentId)
+                ->where('discussion_id', $post->discussion_id)
+                ->exists();
+
+            if ($parentExists) {
+                $post->parent_id = $parentId;
+            }
         }
     }
 }
