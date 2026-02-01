@@ -1,6 +1,6 @@
 {
     "name": "lady-byron/threadify",
-    "description": "A Flarum extension that adds threaded discussions with visual indentation to your forum, making complex conversations easier to follow.",
+    "description": "A Flarum extension that adds threaded discussions with visual indentation.",
     "type": "flarum-extension",
     "license": "MIT",
     "require": {
@@ -15,20 +15,13 @@
 
     "extra": {
         "flarum-extension": {
-            "title": "Threadify",
+            "title": "Flop Threadify",
             "category": "feature",
             "icon": {
-                "name": "fas fa-comment-dots",
+                "name": "fas fa-list-tree",
                 "backgroundColor": "#4D698E",
                 "color": "#fff"
             }
-        },
-        "flarum-cli": {
-            "modules": {
-                "js": "js/dist"
-            }
         }
-    },
-    "minimum-stability": "stable",
-    "prefer-stable": true
+    }
 }
