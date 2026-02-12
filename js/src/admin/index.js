@@ -130,41 +130,55 @@ class RebuildConfirmModal extends Modal {
 }
 
 app.initializers.add('syntaxoutlaw-threadify-admin', () => {
-  // Custom tag selector component: dropdown only, loads current value from API, saves on change
+  const apiUrl = () => app.forum.attribute('apiUrl');
+
+  // Load our settings first (includes tagsExtensionEnabled). Only call /tags when Tags extension is enabled.
   const TagSelectorSetting = {
     oninit(vnode) {
       this.tags = [];
-      this.currentValue = ''; // loaded from API so dropdown shows correct value after reload
+      this.currentValue = '';
       this.loading = true;
-      this.savedMessage = false; // show "saved" feedback after changing tag
+      this.savedMessage = false;
+      this.tagsExtensionEnabled = false;
 
-      const apiUrl = app.forum.attribute('apiUrl');
+      // Load our settings first so we know if Tags is enabled before calling /tags
+      app.request({ method: 'GET', url: apiUrl() + '/threadify/admin/settings' })
+        .then((settingsResponse) => {
+          const body = settingsResponse && (settingsResponse.threadifyTag !== undefined ? settingsResponse : (settingsResponse.data || {}));
+          this.currentValue = (body && body.threadifyTag) || '';
+          this.tagsExtensionEnabled = !!(body && body.tagsExtensionEnabled);
+          if (!app.data.settings) app.data.settings = {};
+          app.data.settings['syntaxoutlaw-threadify.tag'] = this.currentValue;
 
-      // Load tags and current threadify tag in parallel
-      Promise.all([
-        app.request({ method: 'GET', url: apiUrl + '/tags' }),
-        app.request({ method: 'GET', url: apiUrl + '/threadify/admin/settings' })
-      ]).then(([tagsResponse, settingsResponse]) => {
-        this.tags = tagsResponse.data || [];
-        // Flarum may return parsed body directly or under .data
-        const body = settingsResponse && (settingsResponse.threadifyTag !== undefined ? settingsResponse : settingsResponse.data);
-        this.currentValue = (body && body.threadifyTag) || '';
-        if (!app.data.settings) app.data.settings = {};
-        app.data.settings['syntaxoutlaw-threadify.tag'] = this.currentValue;
-        this.loading = false;
-        m.redraw();
-      }).catch(() => {
-        this.loading = false;
-        m.redraw();
-      });
+          if (!this.tagsExtensionEnabled) {
+            this.loading = false;
+            m.redraw();
+            return;
+          }
+          // Only fetch /tags when Tags extension is enabled (avoids 404 when Tags is disabled)
+          return app.request({ method: 'GET', url: apiUrl() + '/tags' });
+        })
+        .then((tagsResponse) => {
+          if (tagsResponse && tagsResponse.data) this.tags = tagsResponse.data;
+          this.loading = false;
+          m.redraw();
+        })
+        .catch(() => {
+          this.loading = false;
+          m.redraw();
+        });
     },
 
     view(vnode) {
       const setting = vnode.attrs.setting;
-      // Use component state (loaded from API) so dropdown shows correct value after reload
-      const currentValue = this.currentValue !== undefined
-        ? this.currentValue
-        : (app.data && app.data.settings && app.data.settings[setting]) || '';
+      const currentValue = this.currentValue !== undefined ? this.currentValue : (app.data && app.data.settings && app.data.settings[setting]) || '';
+
+      // When Tags extension is disabled, don't render the tag dropdown (avoids 404 and hides tag-only UI)
+      if (!this.tagsExtensionEnabled) {
+        return m('div', { className: 'Form-group' }, [
+          m('p', { className: 'helpText', style: { color: 'var(--muted-color, #999)' } }, 'Tag-based threading is not available. Enable the Tags extension (flarum/tags) to choose a threadify tag.')
+        ]);
+      }
 
       return m('div', { className: 'Form-group' }, [
         m('label', {}, 'Threadify tag'),
@@ -177,22 +191,15 @@ app.initializers.add('syntaxoutlaw-threadify-admin', () => {
             if (!app.data.settings) app.data.settings = {};
             app.data.settings[setting] = newValue;
             this.savedMessage = false;
-
             app.request({
               method: 'POST',
-              url: app.forum.attribute('apiUrl') + '/settings',
+              url: apiUrl() + '/settings',
               body: { [setting]: newValue }
             }).then(() => {
               this.savedMessage = true;
               m.redraw();
-              setTimeout(() => {
-                this.savedMessage = false;
-                m.redraw();
-              }, 3000);
-            }).catch((e) => {
-              console.error('[Threadify] Failed to save tag setting', e);
-            });
-
+              setTimeout(() => { this.savedMessage = false; m.redraw(); }, 3000);
+            }).catch((e) => { console.error('[Threadify] Failed to save tag setting', e); });
             m.redraw();
           },
           disabled: this.loading
@@ -208,38 +215,79 @@ app.initializers.add('syntaxoutlaw-threadify-admin', () => {
           className: 'helpText',
           style: { color: 'var(--success-color, #4caf50)', marginTop: '0.5rem', fontWeight: '500' }
         }, 'Your settings have been saved.'),
-        m('p', { className: 'helpText' }, 'Select which tag should enable threading for discussions. Only discussions with this tag will be threaded when "Thread by tag" mode is enabled.')
+        m('p', { className: 'helpText' }, 'Select which tag should enable threading for discussions.')
+      ]);
+    }
+  };
+
+  // When Tags is disabled we show only "Thread all" and a note; when enabled we show mode + tag dropdown.
+  const ThreadifyModeAndTagSettings = {
+    oninit() {
+      this.settingsLoaded = false;
+      this.tagsExtensionEnabled = false;
+      app.request({ method: 'GET', url: apiUrl() + '/threadify/admin/settings' })
+        .then((res) => {
+          const body = res && (res.threadifyTag !== undefined ? res : (res.data || {}));
+          this.tagsExtensionEnabled = !!(body && body.tagsExtensionEnabled);
+          this.settingsLoaded = true;
+          m.redraw();
+        })
+        .catch(() => { this.settingsLoaded = true; m.redraw(); });
+    },
+    view() {
+      if (!this.settingsLoaded) return m('div', { className: 'Form-group' }, m('p', { className: 'helpText' }, 'Loading…'));
+
+      // Tags disabled: assume "Thread all", keep Threadify tag heading, no dropdown, message on separate line
+      if (!this.tagsExtensionEnabled) {
+        return m('div', [
+          m('div', { className: 'Form-group' }, [
+            m('label', {}, 'Threadify mode'),
+            m('p', { className: 'helpText', style: { marginTop: '0.25rem' } }, 'Thread all discussions.')
+          ]),
+          m('div', { className: 'Form-group' }, [
+            m('label', {}, 'Threadify tag'),
+            m('p', { className: 'helpText', style: { marginTop: '0.25rem' } }, 'Enable the Tags extension (flarum/tags) to use tag-based threading.')
+          ])
+        ]);
+      }
+
+      // Tags enabled: show mode dropdown and tag dropdown
+      const mode = app.data.settings['syntaxoutlaw-threadify.mode'] || 'default';
+      const isTagMode = mode === 'tag';
+      return m('div', [
+        m('div', { className: 'Form-group' }, [
+          m('label', {}, 'Threadify mode'),
+          m('select', {
+            className: 'FormControl',
+            value: mode,
+            onchange: (e) => {
+              const v = e.target.value;
+              if (!app.data.settings) app.data.settings = {};
+              app.data.settings['syntaxoutlaw-threadify.mode'] = v;
+              app.request({ method: 'POST', url: apiUrl() + '/settings', body: { 'syntaxoutlaw-threadify.mode': v } }).catch(() => {});
+              m.redraw();
+            }
+          }, [
+            m('option', { value: 'default' }, 'Thread all discussions'),
+            m('option', { value: 'tag' }, 'Thread discussions with selected tag')
+          ])
+        ]),
+        m('div', { className: 'Form-group' }, [
+          m(TagSelectorSetting, { setting: 'syntaxoutlaw-threadify.tag' }),
+          !isTagMode && m('p', {
+            className: 'helpText',
+            style: { color: 'var(--muted-color, #999)', fontStyle: 'italic', marginTop: '0.5rem' }
+          }, 'Note: This setting only applies when "Thread discussions with selected tag" mode is enabled.')
+        ])
       ]);
     }
   };
 
   app.extensionData
     .for('syntaxoutlaw-threadify')
-    // Threading mode setting: thread all discussions by default, or only those with a selected tag
-    .registerSetting({
-      setting: 'syntaxoutlaw-threadify.mode',
-      type: 'select',
-      label: 'Threadify mode',
-      options: {
-        default: 'Thread all discussions',
-        tag: 'Thread discussions with selected tag',
-      },
-      default: 'default',
-    })
-    // Tag selector: dropdown only. Value loaded from GET /threadify/admin/settings, saved via POST /settings.
+    // Mode + tag settings: when Tags disabled, show only "Thread all" and a note; when enabled, show mode select + tag select
     .registerSetting(function() {
-      const mode = app.data.settings['syntaxoutlaw-threadify.mode'] || 'default';
-      const isTagMode = mode === 'tag';
-
-      return m('div', [
-        m(TagSelectorSetting, {
-          setting: 'syntaxoutlaw-threadify.tag'
-        }),
-        !isTagMode && m('p', {
-          className: 'helpText',
-          style: { color: 'var(--muted-color, #999)', fontStyle: 'italic', marginTop: '0.5rem' }
-        }, 'Note: This setting only applies when "Thread discussions with selected tag" mode is enabled.')
-      ]);
+      return m(ThreadifyModeAndTagSettings);
     })
     // Existing dangerous rebuild action
     .registerSetting(function () {

@@ -5,6 +5,7 @@ use Flarum\Post\Event\Saving;
 use Flarum\Post\Event\Posted;
 use Flarum\Api\Serializer\PostSerializer;
 use Flarum\Api\Serializer\ForumSerializer;
+use Flarum\Extension\ExtensionManager;
 use Flarum\Settings\SettingsRepositoryInterface;
 use SyntaxOutlaw\Threadify\Listener\SavePostParentId;
 use SyntaxOutlaw\Threadify\Listener\SavePostToThreadifyTable;
@@ -35,12 +36,16 @@ return [
     (new Extend\ApiSerializer(ForumSerializer::class))
         ->attributes(function ($serializer, $forum, $request) {
             $settings = resolve(SettingsRepositoryInterface::class);
+            /** @var ExtensionManager $extensions */
+            $extensions = resolve(ExtensionManager::class);
             $mode = $settings->get('syntaxoutlaw-threadify.mode', 'default');
             $tag = $settings->get('syntaxoutlaw-threadify.tag', 'threadify'); // Default to 'threadify' for backward compatibility
-            
+            $tagsEnabled = $extensions->isEnabled('flarum-tags');
+
             return [
                 'threadifyMode' => $mode ?: 'default', // Ensure it's never null
                 'threadifyTag' => $tag ?: 'threadify', // Ensure it's never null
+                'threadifyTagsEnabled' => $tagsEnabled, // When false, forum treats as "thread all"
             ];
         }),
 

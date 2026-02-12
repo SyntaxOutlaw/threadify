@@ -2,6 +2,7 @@
 
 namespace SyntaxOutlaw\Threadify\Api\Controller;
 
+use Flarum\Extension\ExtensionManager;
 use Flarum\Http\RequestUtil;
 use Flarum\Settings\SettingsRepositoryInterface;
 use Laminas\Diactoros\Response\JsonResponse;
@@ -18,9 +19,14 @@ class GetThreadifySettingsController implements RequestHandlerInterface
 
         /** @var SettingsRepositoryInterface $settings */
         $settings = resolve(SettingsRepositoryInterface::class);
+        /** @var ExtensionManager $extensions */
+        $extensions = resolve(ExtensionManager::class);
+
+        $tagsEnabled = $extensions->isEnabled('flarum-tags');
 
         return new JsonResponse([
             'threadifyTag' => $settings->get('syntaxoutlaw-threadify.tag', 'threadify'),
+            'tagsExtensionEnabled' => $tagsEnabled,
         ]);
     }
 }

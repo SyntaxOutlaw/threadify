@@ -121,6 +121,15 @@ export function shouldUseThreadsApi(discussion) {
     return true;
   }
 
+  // Tag-based behavior: only when Tags extension is enabled; otherwise fall back to thread all
+  const tagsEnabled = app.forum && typeof app.forum.attribute === 'function'
+    ? app.forum.attribute('threadifyTagsEnabled')
+    : false;
+  if (mode === 'tag' && !tagsEnabled) {
+    console.log('[Threadify] shouldUseThreadsApi: mode=tag but Tags extension disabled → threading ENABLED for all discussions');
+    return true;
+  }
+
   // Tag-based behavior: only thread discussions with the configured tag
   if (mode === 'tag') {
     // If the tags extension is not present, or tags are not loaded, just don't thread.
