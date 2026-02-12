@@ -90,7 +90,7 @@ app.initializers.add('syntaxoutlaw-threadify', () => {
 export { createThreadedPosts } from './utils/ThreadTree';
 export { calculateThreadDepth, clearThreadDepthCache } from './utils/ThreadDepth';
 export { extractParentIdFromContent } from './components/ThreadedReplyComposer';
-export { getThreadedPostsCache, isThreadingActive } from './components/ThreadedPostStream';
+export { isThreadingActive } from './components/ThreadedPostStream';
 
 /**
  * Get extension version and status information

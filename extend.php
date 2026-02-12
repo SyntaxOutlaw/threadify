@@ -23,6 +23,7 @@ return [
     // API Routes
     (new Extend\Routes('api'))
         ->get('/discussions/{id}/threads', 'discussions.threads', ListDiscussionThreadsController::class)
+        ->get('/threadify/admin/settings', 'threadify.admin.settings', SyntaxOutlaw\Threadify\Api\Controller\GetThreadifySettingsController::class)
         ->post('/threadify/admin/rebuild-parent-ids', 'threadify.admin.rebuild-parent-ids', SyntaxOutlaw\Threadify\Api\Controller\RebuildParentIdsController::class),
     
     // Event listeners

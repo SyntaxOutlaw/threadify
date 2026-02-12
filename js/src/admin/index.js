@@ -130,18 +130,27 @@ class RebuildConfirmModal extends Modal {
 }
 
 app.initializers.add('syntaxoutlaw-threadify-admin', () => {
-  // Custom tag selector component that loads tags and integrates with Flarum's settings
+  // Custom tag selector component: dropdown only, loads current value from API, saves on change
   const TagSelectorSetting = {
     oninit(vnode) {
       this.tags = [];
+      this.currentValue = ''; // loaded from API so dropdown shows correct value after reload
       this.loading = true;
-      
-      // Load tags from the API
-      app.request({
-        method: 'GET',
-        url: app.forum.attribute('apiUrl') + '/tags',
-      }).then(response => {
-        this.tags = response.data || [];
+      this.savedMessage = false; // show "saved" feedback after changing tag
+
+      const apiUrl = app.forum.attribute('apiUrl');
+
+      // Load tags and current threadify tag in parallel
+      Promise.all([
+        app.request({ method: 'GET', url: apiUrl + '/tags' }),
+        app.request({ method: 'GET', url: apiUrl + '/threadify/admin/settings' })
+      ]).then(([tagsResponse, settingsResponse]) => {
+        this.tags = tagsResponse.data || [];
+        // Flarum may return parsed body directly or under .data
+        const body = settingsResponse && (settingsResponse.threadifyTag !== undefined ? settingsResponse : settingsResponse.data);
+        this.currentValue = (body && body.threadifyTag) || '';
+        if (!app.data.settings) app.data.settings = {};
+        app.data.settings['syntaxoutlaw-threadify.tag'] = this.currentValue;
         this.loading = false;
         m.redraw();
       }).catch(() => {
@@ -149,38 +158,56 @@ app.initializers.add('syntaxoutlaw-threadify-admin', () => {
         m.redraw();
       });
     },
-    
+
     view(vnode) {
       const setting = vnode.attrs.setting;
-      // Get the current value from Flarum's settings data
-      // app.data.settings is populated by Flarum when the settings page loads
-      const currentValue = (app.data && app.data.settings && app.data.settings[setting]) || '';
-      
+      // Use component state (loaded from API) so dropdown shows correct value after reload
+      const currentValue = this.currentValue !== undefined
+        ? this.currentValue
+        : (app.data && app.data.settings && app.data.settings[setting]) || '';
+
       return m('div', { className: 'Form-group' }, [
         m('label', {}, 'Threadify tag'),
         m('select', {
           className: 'FormControl',
           value: currentValue,
           onchange: (e) => {
-            // Update the setting value in app.data.settings so it's included when form is saved
             const newValue = e.target.value;
-            if (!app.data.settings) {
-              app.data.settings = {};
-            }
+            this.currentValue = newValue;
+            if (!app.data.settings) app.data.settings = {};
             app.data.settings[setting] = newValue;
-            
-            // Trigger a redraw to update the UI
+            this.savedMessage = false;
+
+            app.request({
+              method: 'POST',
+              url: app.forum.attribute('apiUrl') + '/settings',
+              body: { [setting]: newValue }
+            }).then(() => {
+              this.savedMessage = true;
+              m.redraw();
+              setTimeout(() => {
+                this.savedMessage = false;
+                m.redraw();
+              }, 3000);
+            }).catch((e) => {
+              console.error('[Threadify] Failed to save tag setting', e);
+            });
+
             m.redraw();
           },
           disabled: this.loading
         }, [
-          m('option', { value: '' }, '-- Select a tag --'),
+          m('option', { value: '', selected: currentValue === '' }, '-- Select a tag --'),
           ...this.tags.map(tag => {
             const slug = tag.attributes?.slug || tag.attributes?.name || '';
             const name = tag.attributes?.name || slug;
-            return m('option', { value: slug }, name);
+            return m('option', { value: slug, selected: currentValue === slug }, name);
           })
         ]),
+        this.savedMessage && m('p', {
+          className: 'helpText',
+          style: { color: 'var(--success-color, #4caf50)', marginTop: '0.5rem', fontWeight: '500' }
+        }, 'Your settings have been saved.'),
         m('p', { className: 'helpText' }, 'Select which tag should enable threading for discussions. Only discussions with this tag will be threaded when "Thread by tag" mode is enabled.')
       ]);
     }
@@ -199,18 +226,12 @@ app.initializers.add('syntaxoutlaw-threadify-admin', () => {
       },
       default: 'default',
     })
-    // Tag selector setting (always visible, but only used when mode is "tag")
-    .registerSetting({
-      setting: 'syntaxoutlaw-threadify.tag',
-      type: 'text',
-      label: 'Threadify tag',
-      default: 'threadify',
-    }, function() {
-      // Custom render function - show our custom tag selector instead of text input
+    // Tag selector: dropdown only. Value loaded from GET /threadify/admin/settings, saved via POST /settings.
+    .registerSetting(function() {
       const mode = app.data.settings['syntaxoutlaw-threadify.mode'] || 'default';
       const isTagMode = mode === 'tag';
-      
-      return m('div', { className: 'Form-group' }, [
+
+      return m('div', [
         m(TagSelectorSetting, {
           setting: 'syntaxoutlaw-threadify.tag'
         }),
