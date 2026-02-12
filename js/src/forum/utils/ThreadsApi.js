@@ -90,12 +90,18 @@ export function shouldUseThreadsApi(discussion) {
     return false;
   }
 
-  // Read the mode setting from forum attributes (exposed via Extend\Settings)
+  // Read the mode and tag settings from forum attributes (exposed via Extend\Settings)
   const rawMode =
     app.forum && typeof app.forum.attribute === 'function'
       ? app.forum.attribute('threadifyMode')
       : null;
   const mode = rawMode || 'default';
+  
+  const configuredTag =
+    app.forum && typeof app.forum.attribute === 'function'
+      ? app.forum.attribute('threadifyTag')
+      : null;
+  const threadifyTag = configuredTag || 'threadify'; // Default to 'threadify' for backward compatibility
 
   console.log(
     '[Threadify] shouldUseThreadsApi:',
@@ -104,7 +110,9 @@ export function shouldUseThreadsApi(discussion) {
     'mode from setting =',
     rawMode,
     'effective mode =',
-    mode
+    mode,
+    'configured tag =',
+    threadifyTag
   );
 
   // Default behavior: thread all discussions
@@ -113,7 +121,7 @@ export function shouldUseThreadsApi(discussion) {
     return true;
   }
 
-  // Tag-based behavior: only thread discussions with secondary tag "threadify"
+  // Tag-based behavior: only thread discussions with the configured tag
   if (mode === 'tag') {
     // If the tags extension is not present, or tags are not loaded, just don't thread.
     let tags = [];
@@ -149,17 +157,19 @@ export function shouldUseThreadsApi(discussion) {
       return '(unknown)';
     });
 
-    // Check for a tag with slug "threadify"
-    const hasThreadifyTag = tagSlugs.includes('threadify');
+    // Check for the configured tag
+    const hasConfiguredTag = tagSlugs.includes(threadifyTag);
 
     console.log(
-      '[Threadify] shouldUseThreadsApi: mode=tag, tags =',
+      '[Threadify] shouldUseThreadsApi: mode=tag, configured tag =',
+      threadifyTag,
+      'discussion tags =',
       tagSlugs,
-      '→ hasThreadifyTag =',
-      hasThreadifyTag
+      '→ hasConfiguredTag =',
+      hasConfiguredTag
     );
 
-    return hasThreadifyTag;
+    return hasConfiguredTag;
   }
 
   // Unknown mode: be conservative and disable threading to avoid surprises

@@ -130,18 +130,95 @@ class RebuildConfirmModal extends Modal {
 }
 
 app.initializers.add('syntaxoutlaw-threadify-admin', () => {
+  // Custom tag selector component that loads tags and integrates with Flarum's settings
+  const TagSelectorSetting = {
+    oninit(vnode) {
+      this.tags = [];
+      this.loading = true;
+      
+      // Load tags from the API
+      app.request({
+        method: 'GET',
+        url: app.forum.attribute('apiUrl') + '/tags',
+      }).then(response => {
+        this.tags = response.data || [];
+        this.loading = false;
+        m.redraw();
+      }).catch(() => {
+        this.loading = false;
+        m.redraw();
+      });
+    },
+    
+    view(vnode) {
+      const setting = vnode.attrs.setting;
+      // Get the current value from Flarum's settings data
+      // app.data.settings is populated by Flarum when the settings page loads
+      const currentValue = (app.data && app.data.settings && app.data.settings[setting]) || '';
+      
+      return m('div', { className: 'Form-group' }, [
+        m('label', {}, 'Threadify tag'),
+        m('select', {
+          className: 'FormControl',
+          value: currentValue,
+          onchange: (e) => {
+            // Update the setting value in app.data.settings so it's included when form is saved
+            const newValue = e.target.value;
+            if (!app.data.settings) {
+              app.data.settings = {};
+            }
+            app.data.settings[setting] = newValue;
+            
+            // Trigger a redraw to update the UI
+            m.redraw();
+          },
+          disabled: this.loading
+        }, [
+          m('option', { value: '' }, '-- Select a tag --'),
+          ...this.tags.map(tag => {
+            const slug = tag.attributes?.slug || tag.attributes?.name || '';
+            const name = tag.attributes?.name || slug;
+            return m('option', { value: slug }, name);
+          })
+        ]),
+        m('p', { className: 'helpText' }, 'Select which tag should enable threading for discussions. Only discussions with this tag will be threaded when "Thread by tag" mode is enabled.')
+      ]);
+    }
+  };
+
   app.extensionData
     .for('syntaxoutlaw-threadify')
-    // Threading mode setting: thread all discussions by default, or only those with the "threadify" tag
+    // Threading mode setting: thread all discussions by default, or only those with a selected tag
     .registerSetting({
       setting: 'syntaxoutlaw-threadify.mode',
       type: 'select',
       label: 'Threadify mode',
       options: {
         default: 'Thread all discussions',
-        tag: 'Thread discussions with secondary tag"',
+        tag: 'Thread discussions with selected tag',
       },
       default: 'default',
+    })
+    // Tag selector setting (always visible, but only used when mode is "tag")
+    .registerSetting({
+      setting: 'syntaxoutlaw-threadify.tag',
+      type: 'text',
+      label: 'Threadify tag',
+      default: 'threadify',
+    }, function() {
+      // Custom render function - show our custom tag selector instead of text input
+      const mode = app.data.settings['syntaxoutlaw-threadify.mode'] || 'default';
+      const isTagMode = mode === 'tag';
+      
+      return m('div', { className: 'Form-group' }, [
+        m(TagSelectorSetting, {
+          setting: 'syntaxoutlaw-threadify.tag'
+        }),
+        !isTagMode && m('p', {
+          className: 'helpText',
+          style: { color: 'var(--muted-color, #999)', fontStyle: 'italic', marginTop: '0.5rem' }
+        }, 'Note: This setting only applies when "Thread discussions with selected tag" mode is enabled.')
+      ]);
     })
     // Existing dangerous rebuild action
     .registerSetting(function () {

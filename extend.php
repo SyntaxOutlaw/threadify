@@ -35,9 +35,11 @@ return [
         ->attributes(function ($serializer, $forum, $request) {
             $settings = resolve(SettingsRepositoryInterface::class);
             $mode = $settings->get('syntaxoutlaw-threadify.mode', 'default');
+            $tag = $settings->get('syntaxoutlaw-threadify.tag', 'threadify'); // Default to 'threadify' for backward compatibility
             
             return [
                 'threadifyMode' => $mode ?: 'default', // Ensure it's never null
+                'threadifyTag' => $tag ?: 'threadify', // Ensure it's never null
             ];
         }),
 
