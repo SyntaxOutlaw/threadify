@@ -21,10 +21,16 @@ import ReplyComposer from 'flarum/forum/components/ReplyComposer';
  * 
  * Sets up hooks to automatically detect and add parent_id relationships
  * when users reply to specific posts using the mentions system.
+ * 
+ * Note: We always extract and save parent_id from mentions, regardless of
+ * whether Threadify is currently active for the discussion. This ensures
+ * that threading relationships are preserved if Threadify is enabled later,
+ * or if the discussion mode changes from "tag" to "default".
  */
 export function initThreadedReplyComposer() {
   // Hook into reply submission to add parent_id
   extend(ReplyComposer.prototype, 'data', function(data) {
+    // Always extract parent_id from mentions - it's useful metadata regardless of threading mode
     const parentId = extractParentIdFromContent(data.content);
     
     if (parentId) {

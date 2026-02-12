@@ -31,9 +31,11 @@ export function loadDiscussionThreads(discussionId) {
     // Process included data first to populate the store
     if (response.included) {
       console.log(`[Threadify] Processing ${response.included.length} posts`);
-      response.included.forEach(item => {
-        app.store.pushObject(item);
-      });
+      response.included
+        .filter(item => item && item.type && item.id) // Filter out null/invalid items
+        .forEach(item => {
+          app.store.pushObject(item);
+        });
     }
     
     // Convert thread data to posts with threading metadata
@@ -67,15 +69,102 @@ export function loadDiscussionThreads(discussionId) {
 }
 
 /**
- * Check if threads API is available for a discussion
- * 
+ * Check if threads API is available for a discussion.
+ *
+ * Modes (configured in admin):
+ * - syntaxoutlaw-threadify.mode = "default" (or unset):
+ *     Thread all discussions.
+ * - syntaxoutlaw-threadify.mode = "tag":
+ *     Only thread discussions that have the secondary tag with slug "threadify".
+ *
+ * We emit console logs so you can see exactly what mode was detected,
+ * what tags were found, and why a particular discussion was threaded or not.
+ *
  * @param {Discussion} discussion - The discussion to check
  * @returns {boolean} - True if threads API should be used
  */
 export function shouldUseThreadsApi(discussion) {
-  // For now, always try to use the threads API
-  // In the future, this could be configurable or based on discussion settings
-  return true;
+  // Gracefully handle missing discussion (e.g. during early lifecycle)
+  if (!discussion) {
+    console.log('[Threadify] shouldUseThreadsApi: no discussion, returning false');
+    return false;
+  }
+
+  // Read the mode setting from forum attributes (exposed via Extend\Settings)
+  const rawMode =
+    app.forum && typeof app.forum.attribute === 'function'
+      ? app.forum.attribute('threadifyMode')
+      : null;
+  const mode = rawMode || 'default';
+
+  console.log(
+    '[Threadify] shouldUseThreadsApi:',
+    'discussion id =',
+    typeof discussion.id === 'function' ? discussion.id() : discussion.id,
+    'mode from setting =',
+    rawMode,
+    'effective mode =',
+    mode
+  );
+
+  // Default behavior: thread all discussions
+  if (mode === 'default') {
+    console.log('[Threadify] shouldUseThreadsApi: mode=default → threading ENABLED for all discussions');
+    return true;
+  }
+
+  // Tag-based behavior: only thread discussions with secondary tag "threadify"
+  if (mode === 'tag') {
+    // If the tags extension is not present, or tags are not loaded, just don't thread.
+    let tags = [];
+
+    // Preferred: use the discussion.tags() relationship provided by flarum/tags
+    if (typeof discussion.tags === 'function') {
+      const rel = discussion.tags();
+      if (Array.isArray(rel)) {
+        tags = rel;
+      }
+    } else if (discussion.data && discussion.data.relationships && discussion.data.relationships.tags) {
+      // Fallback: raw relationship data, resolve through the store if possible
+      const rel = discussion.data.relationships.tags.data || [];
+      tags = rel
+        .map(tagRel => {
+          if (!tagRel || !tagRel.id) return null;
+          return app.store && app.store.getById ? app.store.getById('tags', tagRel.id) : null;
+        })
+        .filter(tag => tag);
+    }
+
+    if (!tags || !tags.length) {
+      console.log('[Threadify] shouldUseThreadsApi: mode=tag but discussion has no tags → threading DISABLED');
+      return false;
+    }
+
+    // Compute a debug list of tag slugs
+    const tagSlugs = tags.map(t => {
+      if (!t) return '(null)';
+      if (typeof t.slug === 'function') return t.slug();
+      if (t.slug) return t.slug;
+      if (t.data && t.data.attributes && t.data.attributes.slug) return t.data.attributes.slug;
+      return '(unknown)';
+    });
+
+    // Check for a tag with slug "threadify"
+    const hasThreadifyTag = tagSlugs.includes('threadify');
+
+    console.log(
+      '[Threadify] shouldUseThreadsApi: mode=tag, tags =',
+      tagSlugs,
+      '→ hasThreadifyTag =',
+      hasThreadifyTag
+    );
+
+    return hasThreadifyTag;
+  }
+
+  // Unknown mode: be conservative and disable threading to avoid surprises
+  console.log('[Threadify] shouldUseThreadsApi: unknown mode value', mode, '→ threading DISABLED');
+  return false;
 }
 
 /**

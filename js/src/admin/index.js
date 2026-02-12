@@ -5,12 +5,24 @@ console.log('[Threadify] Admin panel JS loaded');
 app.initializers.add('syntaxoutlaw-threadify-admin', () => {
   app.extensionData
     .for('syntaxoutlaw-threadify')
+    // Threading mode setting: thread all discussions by default, or only those with the "threadify" tag
+    .registerSetting({
+      setting: 'syntaxoutlaw-threadify.mode',
+      type: 'select',
+      label: 'Threadify mode',
+      options: {
+        default: 'Thread all discussions',
+        tag: 'Thread discussions with secondary tag"',
+      },
+      default: 'default',
+    })
+    // Existing dangerous rebuild action
     .registerSetting(function () {
       return m('div', [
         m('button', {
           className: 'Button Button--danger',
           onclick: () => {
-            if (!confirm('Are you sure? This will rebuild parent_id and threadify_threads from scratch!')) return;
+            if (!confirm('Are you sure? This will rebuild parent_id and threadify_threads from scratch! This will take a while on large forums.')) return;
             this.loading = true;
             m.redraw();
             app.request({

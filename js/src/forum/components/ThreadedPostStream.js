@@ -63,7 +63,7 @@ function applyThreadedOrderToDiscussion(discussionId, postsInOrder) {
 }
 
 function loadThreadsForDiscussion(discussionId) {
-  if (!discussionId || !shouldUseThreadsApi({ id: () => discussionId })) return;
+  if (!discussionId) return;
   currentDiscussionId = discussionId;
   threadsLoaded = false;
   threadedPosts = null;
@@ -95,13 +95,16 @@ export function initThreadedPostStream() {
     return function(discussion) {
       original.call(this, discussion);
       if (!this.stream || !this.stream.discussion) return;
-      const discussionId = this.stream.discussion.id();
+      const discussionModel = this.stream.discussion;
+      const discussionId = discussionModel.id();
       if (!sameDiscussion(currentDiscussionId, discussionId)) {
         currentDiscussionId = discussionId;
         threadsLoaded = false;
         threadedPosts = null;
       }
-      loadThreadsForDiscussion(discussionId);
+      if (shouldUseThreadsApi(discussionModel)) {
+        loadThreadsForDiscussion(discussionId);
+      }
     };
   });
 
