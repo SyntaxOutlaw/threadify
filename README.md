@@ -16,6 +16,7 @@ A Flarum extension that adds **threaded discussions** with visual indentation to
 - **Real-time updates** - new replies appear in correct threaded positions instantly
 - **Seamless integration** - uses existing Flarum mentions
 - **Works on existing discussions** - will also create threads for past discussions
+- **Optional tag-based threading** - thread all discussions, or only those with a chosen tag (e.g. for Q&A-style tags)
 
 ## 📋 Requirements
 

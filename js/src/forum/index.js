@@ -16,7 +16,7 @@
  * - components/: Flarum component extensions (PostStream, Post, ReplyComposer)
  * 
  * @author Threadify Extension
- * @version 1.1
+ * @version 1.2.0
  */
 
 // Import utility modules
@@ -90,7 +90,7 @@ app.initializers.add('syntaxoutlaw-threadify', () => {
 export { createThreadedPosts } from './utils/ThreadTree';
 export { calculateThreadDepth, clearThreadDepthCache } from './utils/ThreadDepth';
 export { extractParentIdFromContent } from './components/ThreadedReplyComposer';
-export { getThreadedPostsCache, isThreadingActive } from './components/ThreadedPostStream';
+export { isThreadingActive } from './components/ThreadedPostStream';
 
 /**
  * Get extension version and status information
@@ -101,7 +101,7 @@ export { getThreadedPostsCache, isThreadingActive } from './components/ThreadedP
  */
 export function getThreadifyStatus() {
   return {
-    version: '1.1',
+    version: '1.2.0',
     name: 'Threadify',
     author: 'syntaxoutlaw',
     isActive: true,

@@ -13,6 +13,7 @@
 import { extend } from 'flarum/common/extend';
 import Post from 'flarum/forum/components/Post';
 import { getThreadCssClasses } from '../utils/SimplifiedThreadDepth';
+import { shouldUseThreadsApi } from '../utils/ThreadsApi';
 
 /**
  * Initialize Post component extensions for threading
@@ -28,6 +29,12 @@ export function initThreadedPost() {
     // Skip processing if we don't have a valid post
     if (!post) {
       console.warn('[Threadify] No post in ThreadedPost.classes');
+      return classes;
+    }
+
+    // Only apply threaded CSS when Threadify is active for this discussion
+    const discussion = typeof post.discussion === 'function' ? post.discussion() : null;
+    if (!discussion || !shouldUseThreadsApi(discussion)) {
       return classes;
     }
     
