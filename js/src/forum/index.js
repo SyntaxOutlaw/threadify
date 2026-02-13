@@ -16,7 +16,7 @@
  * - components/: Flarum component extensions (PostStream, Post, ReplyComposer)
  * 
  * @author Threadify Extension
- * @version 1.1
+ * @version 1.2.0
  */
 
 // Import utility modules
@@ -101,7 +101,7 @@ export { isThreadingActive } from './components/ThreadedPostStream';
  */
 export function getThreadifyStatus() {
   return {
-    version: '1.1',
+    version: '1.2.0',
     name: 'Threadify',
     author: 'syntaxoutlaw',
     isActive: true,
