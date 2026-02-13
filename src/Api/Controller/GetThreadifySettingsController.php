@@ -24,8 +24,19 @@ class GetThreadifySettingsController implements RequestHandlerInterface
 
         $tagsEnabled = $extensions->isEnabled('flarum-tags');
 
+        // Support multiple tags: syntaxoutlaw-threadify.tags (JSON array) or fallback to single syntaxoutlaw-threadify.tag
+        $tagsJson = $settings->get('syntaxoutlaw-threadify.tags');
+        if ($tagsJson !== null && $tagsJson !== '') {
+            $tagsList = json_decode($tagsJson, true);
+            $threadifyTags = is_array($tagsList) ? $tagsList : ['threadify'];
+        } else {
+            $single = $settings->get('syntaxoutlaw-threadify.tag', 'threadify');
+            $threadifyTags = $single ? [$single] : ['threadify'];
+        }
+
         return new JsonResponse([
-            'threadifyTag' => $settings->get('syntaxoutlaw-threadify.tag', 'threadify'),
+            'threadifyTag' => $threadifyTags[0] ?? 'threadify', // backward compat for admin that expects single
+            'threadifyTags' => $threadifyTags,
             'tagsExtensionEnabled' => $tagsEnabled,
         ]);
     }

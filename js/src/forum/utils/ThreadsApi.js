@@ -97,11 +97,24 @@ export function shouldUseThreadsApi(discussion) {
       : null;
   const mode = rawMode || 'default';
   
-  const configuredTag =
+  const configuredTags =
     app.forum && typeof app.forum.attribute === 'function'
-      ? app.forum.attribute('threadifyTag')
-      : null;
-  const threadifyTag = configuredTag || 'threadify'; // Default to 'threadify' for backward compatibility
+      ? app.forum.attribute('threadifyTags')
+      : undefined;
+
+  // Tag configuration semantics:
+  // - If threadifyTags is an array (including empty []), use it as-is.
+  // - If it's undefined / not an array, fall back to the legacy single tag or the
+  //   original default "threadify" for older installs that haven't configured tags.
+  let threadifyTags;
+  if (Array.isArray(configuredTags)) {
+    threadifyTags = configuredTags;
+  } else if (app.forum && typeof app.forum.attribute === 'function') {
+    const legacyTag = app.forum.attribute('threadifyTag');
+    threadifyTags = legacyTag ? [legacyTag] : ['threadify'];
+  } else {
+    threadifyTags = ['threadify'];
+  }
 
   console.log(
     '[Threadify] shouldUseThreadsApi:',
@@ -111,8 +124,8 @@ export function shouldUseThreadsApi(discussion) {
     rawMode,
     'effective mode =',
     mode,
-    'configured tag =',
-    threadifyTag
+    'configured tags =',
+    threadifyTags
   );
 
   // Default behavior: thread all discussions
@@ -130,8 +143,17 @@ export function shouldUseThreadsApi(discussion) {
     return true;
   }
 
-  // Tag-based behavior: only thread discussions with the configured tag
+  // Tag-based behavior:
+  // - If the admin has selected one or more tags, only thread discussions that have
+  //   at least one of those tags.
+  // - If the admin has explicitly selected *no* tags (empty []), do NOT thread any
+  //   discussions.
   if (mode === 'tag') {
+    if (Array.isArray(threadifyTags) && threadifyTags.length === 0) {
+      console.log('[Threadify] shouldUseThreadsApi: mode=tag but no threadify tags are configured → threading DISABLED for all discussions');
+      return false;
+    }
+
     // If the tags extension is not present, or tags are not loaded, just don't thread.
     let tags = [];
 
@@ -166,12 +188,12 @@ export function shouldUseThreadsApi(discussion) {
       return '(unknown)';
     });
 
-    // Check for the configured tag
-    const hasConfiguredTag = tagSlugs.includes(threadifyTag);
+    // Check for any of the configured tags
+    const hasConfiguredTag = threadifyTags.some(slug => tagSlugs.includes(slug));
 
     console.log(
-      '[Threadify] shouldUseThreadsApi: mode=tag, configured tag =',
-      threadifyTag,
+      '[Threadify] shouldUseThreadsApi: mode=tag, configured tags =',
+      threadifyTags,
       'discussion tags =',
       tagSlugs,
       '→ hasConfiguredTag =',

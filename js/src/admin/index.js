@@ -132,30 +132,154 @@ class RebuildConfirmModal extends Modal {
 app.initializers.add('syntaxoutlaw-threadify-admin', () => {
   const apiUrl = () => app.forum.attribute('apiUrl');
 
+  const TAGS_SETTING = 'syntaxoutlaw-threadify.tags';
+
+  // Multi-select dropdown with search (react-select style)
+  const MultiSelectDropdown = {
+    oninit() {
+      this.open = false;
+      this.searchQuery = '';
+      this.dom = null;
+      this.clickOutside = (e) => {
+        if (this.open && this.dom && !this.dom.contains(e.target)) {
+          this.open = false;
+          this.searchQuery = '';
+          m.redraw();
+        }
+      };
+    },
+    oncreate(vnode) {
+      this.dom = vnode.dom;
+      document.addEventListener('click', this.clickOutside);
+    },
+    onupdate(vnode) {
+      this.dom = vnode.dom;
+    },
+    onremove() {
+      document.removeEventListener('click', this.clickOutside);
+    },
+    view(vnode) {
+      const { options, selected, onToggle, placeholder, disabled, disabledMessage, getLabel } = vnode.attrs;
+      const query = (this.searchQuery || '').toLowerCase().trim();
+      const filtered = query
+        ? options.filter(opt => getLabel(opt).toLowerCase().includes(query))
+        : options;
+
+      const triggerLabel = selected.length === 0
+        ? (placeholder || 'Select…')
+        : selected.length === 1
+          ? getLabel(options.find(o => (o.attributes?.slug || o.attributes?.name || '') === selected[0]) || { attributes: { name: selected[0] } })
+          : `${selected.length} tag(s) selected`;
+
+      const handleClick = (e) => {
+        e.stopPropagation();
+        if (disabled) {
+          if (disabledMessage) {
+            app.alerts.show({ type: 'info' }, disabledMessage);
+          }
+          return;
+        }
+        this.open = !this.open;
+        m.redraw();
+      };
+
+      return m('div', {
+        className: 'ThreadifyMultiSelect',
+        style: { position: 'relative', marginTop: '0.25rem' }
+      }, [
+        m('button', {
+          type: 'button',
+          className: 'FormControl',
+          style: { textAlign: 'left', cursor: disabled ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'space-between', opacity: disabled ? 0.6 : 1 },
+          onclick: handleClick
+        }, [
+          m('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, triggerLabel),
+          m('span', { style: { marginLeft: '0.5rem', flexShrink: 0 } }, this.open ? ' ▲' : ' ▼')
+        ]),
+        this.open && !disabled && m('div', {
+          className: 'Dropdown-menu',
+          style: {
+            position: 'absolute',
+            top: '100%',
+            left: 0,
+            right: 0,
+            marginTop: '2px',
+            zIndex: 1000,
+            background: 'var(--body-bg, #fff)',
+            border: '1px solid var(--border-color, #ddd)',
+            borderRadius: '4px',
+            boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+            maxHeight: '280px',
+            display: 'flex',
+            flexDirection: 'column'
+          }
+        }, [
+          m('div', { style: { padding: '6px', borderBottom: '1px solid var(--border-color, #eee)' } }, [
+            m('input', {
+              type: 'text',
+              className: 'FormControl',
+              placeholder: 'Search tags…',
+              value: this.searchQuery,
+              oninput: (e) => { this.searchQuery = e.target.value; m.redraw(); },
+              onkeydown: (e) => { e.stopPropagation(); },
+              style: { margin: 0 }
+            })
+          ]),
+          m('div', {
+            style: { overflowY: 'auto', maxHeight: '220px', padding: '4px 0' }
+          }, filtered.length === 0
+            ? m('div', { style: { padding: '8px 12px', color: 'var(--muted-color, #999)' } }, 'No tags match')
+            : filtered.map(opt => {
+                const slug = opt.attributes?.slug || opt.attributes?.name || '';
+                const name = getLabel(opt);
+                const checked = selected.includes(slug);
+                return m('div', {
+                  role: 'button',
+                  tabindex: 0,
+                  className: 'Dropdown-item',
+                  style: {
+                    cursor: 'pointer',
+                    padding: '6px 12px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '8px',
+                    background: checked ? 'var(--primary-color, #4d698e)' : 'transparent',
+                    color: checked ? '#fff' : 'inherit'
+                  },
+                  onclick: (e) => { e.preventDefault(); e.stopPropagation(); onToggle(slug, checked); },
+                  onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggle(slug, checked); } }
+                }, [
+                  m('span', { style: { flexShrink: 0, width: '16px', textAlign: 'center' } }, checked ? '✓' : ''),
+                  m('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis' } }, name)
+                ]);
+              })
+          )
+        ])
+      ]);
+    }
+  };
+
   // Load our settings first (includes tagsExtensionEnabled). Only call /tags when Tags extension is enabled.
   const TagSelectorSetting = {
     oninit(vnode) {
       this.tags = [];
-      this.currentValue = '';
+      this.selectedTags = []; // array of slugs
       this.loading = true;
-      this.savedMessage = false;
       this.tagsExtensionEnabled = false;
 
-      // Load our settings first so we know if Tags is enabled before calling /tags
       app.request({ method: 'GET', url: apiUrl() + '/threadify/admin/settings' })
         .then((settingsResponse) => {
           const body = settingsResponse && (settingsResponse.threadifyTag !== undefined ? settingsResponse : (settingsResponse.data || {}));
-          this.currentValue = (body && body.threadifyTag) || '';
+          this.selectedTags = Array.isArray(body && body.threadifyTags) ? body.threadifyTags : (body && body.threadifyTag ? [body.threadifyTag] : ['threadify']);
           this.tagsExtensionEnabled = !!(body && body.tagsExtensionEnabled);
           if (!app.data.settings) app.data.settings = {};
-          app.data.settings['syntaxoutlaw-threadify.tag'] = this.currentValue;
+          app.data.settings[TAGS_SETTING] = JSON.stringify(this.selectedTags);
 
           if (!this.tagsExtensionEnabled) {
             this.loading = false;
             m.redraw();
             return;
           }
-          // Only fetch /tags when Tags extension is enabled (avoids 404 when Tags is disabled)
           return app.request({ method: 'GET', url: apiUrl() + '/tags' });
         })
         .then((tagsResponse) => {
@@ -170,52 +294,49 @@ app.initializers.add('syntaxoutlaw-threadify-admin', () => {
     },
 
     view(vnode) {
-      const setting = vnode.attrs.setting;
-      const currentValue = this.currentValue !== undefined ? this.currentValue : (app.data && app.data.settings && app.data.settings[setting]) || '';
+      const isTagMode = vnode.attrs.isTagMode || false;
 
-      // When Tags extension is disabled, don't render the tag dropdown (avoids 404 and hides tag-only UI)
       if (!this.tagsExtensionEnabled) {
         return m('div', { className: 'Form-group' }, [
-          m('p', { className: 'helpText', style: { color: 'var(--muted-color, #999)' } }, 'Tag-based threading is not available. Enable the Tags extension (flarum/tags) to choose a threadify tag.')
+          m('p', { className: 'helpText', style: { color: 'var(--muted-color, #999)' } }, 'Tag-based threading is not available. Enable the Tags extension (flarum/tags) to choose threadify tags.')
         ]);
       }
 
+      const selectedTags = Array.isArray(this.selectedTags) ? this.selectedTags : [];
+
+      const saveTags = (newSelected) => {
+        this.selectedTags = newSelected;
+        const value = JSON.stringify(newSelected);
+        if (!app.data.settings) app.data.settings = {};
+        app.data.settings[TAGS_SETTING] = value;
+        app.request({
+          method: 'POST',
+          url: apiUrl() + '/settings',
+          body: { [TAGS_SETTING]: value }
+        }).then(() => {
+          app.alerts.show({ type: 'success' }, 'Your settings have been saved.');
+          m.redraw();
+        }).catch((e) => { console.error('[Threadify] Failed to save tag setting', e); });
+        m.redraw();
+      };
+
+      const onToggle = (slug, currentlySelected) => {
+        const next = currentlySelected ? selectedTags.filter(s => s !== slug) : selectedTags.concat(slug);
+        saveTags(next);
+      };
+
       return m('div', { className: 'Form-group' }, [
-        m('label', {}, 'Threadify tag'),
-        m('select', {
-          className: 'FormControl',
-          value: currentValue,
-          onchange: (e) => {
-            const newValue = e.target.value;
-            this.currentValue = newValue;
-            if (!app.data.settings) app.data.settings = {};
-            app.data.settings[setting] = newValue;
-            this.savedMessage = false;
-            app.request({
-              method: 'POST',
-              url: apiUrl() + '/settings',
-              body: { [setting]: newValue }
-            }).then(() => {
-              this.savedMessage = true;
-              m.redraw();
-              setTimeout(() => { this.savedMessage = false; m.redraw(); }, 3000);
-            }).catch((e) => { console.error('[Threadify] Failed to save tag setting', e); });
-            m.redraw();
-          },
-          disabled: this.loading
-        }, [
-          m('option', { value: '', selected: currentValue === '' }, '-- Select a tag --'),
-          ...this.tags.map(tag => {
-            const slug = tag.attributes?.slug || tag.attributes?.name || '';
-            const name = tag.attributes?.name || slug;
-            return m('option', { value: slug, selected: currentValue === slug }, name);
-          })
-        ]),
-        this.savedMessage && m('p', {
-          className: 'helpText',
-          style: { color: 'var(--success-color, #4caf50)', marginTop: '0.5rem', fontWeight: '500' }
-        }, 'Your settings have been saved.'),
-        m('p', { className: 'helpText' }, 'Select which tag should enable threading for discussions.')
+        m('label', {}, 'Threadify tag(s)'),
+        m(MultiSelectDropdown, {
+          options: this.tags,
+          selected: selectedTags,
+          onToggle,
+          placeholder: 'Select tag(s)…',
+          disabled: !isTagMode || this.loading,
+          disabledMessage: 'This setting only applies when "Thread discussions by tag" mode is enabled.',
+          getLabel: (opt) => (opt.attributes && (opt.attributes.name || opt.attributes.slug)) || ''
+        }),
+        m('p', { className: 'helpText', style: { marginTop: '0.5rem' } }, 'Select which tag(s) enable threading for discussions. Discussions with any selected tag will be threaded.')
       ]);
     }
   };
@@ -264,20 +385,23 @@ app.initializers.add('syntaxoutlaw-threadify-admin', () => {
               const v = e.target.value;
               if (!app.data.settings) app.data.settings = {};
               app.data.settings['syntaxoutlaw-threadify.mode'] = v;
-              app.request({ method: 'POST', url: apiUrl() + '/settings', body: { 'syntaxoutlaw-threadify.mode': v } }).catch(() => {});
+              app.request({
+                method: 'POST',
+                url: apiUrl() + '/settings',
+                body: { 'syntaxoutlaw-threadify.mode': v }
+              }).then(() => {
+                app.alerts.show({ type: 'success' }, 'Your settings have been saved.');
+                m.redraw();
+              }).catch(() => {});
               m.redraw();
             }
           }, [
             m('option', { value: 'default' }, 'Thread all discussions'),
-            m('option', { value: 'tag' }, 'Thread discussions with selected tag')
+            m('option', { value: 'tag' }, 'Thread discussions by tag')
           ])
         ]),
         m('div', { className: 'Form-group' }, [
-          m(TagSelectorSetting, { setting: 'syntaxoutlaw-threadify.tag' }),
-          !isTagMode && m('p', {
-            className: 'helpText',
-            style: { color: 'var(--muted-color, #999)', fontStyle: 'italic', marginTop: '0.5rem' }
-          }, 'Note: This setting only applies when "Thread discussions with selected tag" mode is enabled.')
+          m(TagSelectorSetting, { isTagMode })
         ])
       ]);
     }

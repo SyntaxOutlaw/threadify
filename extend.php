@@ -39,13 +39,23 @@ return [
             /** @var ExtensionManager $extensions */
             $extensions = resolve(ExtensionManager::class);
             $mode = $settings->get('syntaxoutlaw-threadify.mode', 'default');
-            $tag = $settings->get('syntaxoutlaw-threadify.tag', 'threadify'); // Default to 'threadify' for backward compatibility
             $tagsEnabled = $extensions->isEnabled('flarum-tags');
 
+            // Support multiple tags: syntaxoutlaw-threadify.tags (JSON array) or fallback to single tag
+            $tagsJson = $settings->get('syntaxoutlaw-threadify.tags');
+            if ($tagsJson !== null && $tagsJson !== '') {
+                $tagsList = json_decode($tagsJson, true);
+                $threadifyTags = is_array($tagsList) ? $tagsList : ['threadify'];
+            } else {
+                $single = $settings->get('syntaxoutlaw-threadify.tag', 'threadify');
+                $threadifyTags = $single ? [$single] : ['threadify'];
+            }
+
             return [
-                'threadifyMode' => $mode ?: 'default', // Ensure it's never null
-                'threadifyTag' => $tag ?: 'threadify', // Ensure it's never null
-                'threadifyTagsEnabled' => $tagsEnabled, // When false, forum treats as "thread all"
+                'threadifyMode' => $mode ?: 'default',
+                'threadifyTag' => $threadifyTags[0] ?? 'threadify', // backward compat
+                'threadifyTags' => $threadifyTags,
+                'threadifyTagsEnabled' => $tagsEnabled,
             ];
         }),
 
